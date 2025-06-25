@@ -84,14 +84,10 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
         self.exchange_to_client_id: Dict[str, str] = {}
         
         # Response queue for async updates
-        self.response_queue: asyncio.Queue = asyncio.Queue()
+        self.response_queue: Optional[asyncio.Queue] = None
         
         # Orderflow queue for streaming order updates
-        self.orderflow_queue: asyncio.Queue = asyncio.Queue()
-        
-        # Event loop for async operations
-        self.loop = asyncio.new_event_loop()
-        self.async_thread = None
+        self.orderflow_queue: Optional[asyncio.Queue] = None
         
         # WebSocket state
         self.ws_connected = False
@@ -252,10 +248,11 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
                 t=int(time.time() * 1000)
             )
             
-            self.loop.call_soon_threadsafe(
-                self.response_queue.put_nowait,
-                CptyResponse(summary)
-            )
+            if self.response_queue:
+                try:
+                    self.response_queue.put_nowait(CptyResponse(summary))
+                except asyncio.QueueFull:
+                    logger.warning("Response queue is full, dropping account update")
             
         except Exception as e:
             logger.error(f"Error processing account update: {e}")
@@ -292,12 +289,12 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
     async def _login(self, request: Login) -> bool:
         """Login to Lighter API."""
         try:
-            self.user_id = request.user_id
-            self.account_id = request.account_id or request.user_id
+            self.user_id = request.trader
+            self.account_id = request.account
             
-            # Parse account index from account_id if provided
-            if request.account_id and request.account_id.isdigit():
-                self.account_index = int(request.account_id)
+            # Parse account index from account if provided (could be numeric string)
+            if request.account and request.account.isdigit():
+                self.account_index = int(request.account)
             else:
                 self.account_index = self.config["account_index"]
             
@@ -436,10 +433,11 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
                 order_id=order.cl_ord_id,
                 exchange_order_id=tx_hash_str
             )
-            self.loop.call_soon_threadsafe(
-                self.orderflow_queue.put_nowait,
-                order_ack
-            )
+            if self.orderflow_queue:
+                try:
+                    self.orderflow_queue.put_nowait(order_ack)
+                except asyncio.QueueFull:
+                    logger.warning("Orderflow queue is full, dropping OrderAck")
             logger.info(f"Sent OrderAck for order {order.cl_ord_id}")
             
             return {
@@ -724,36 +722,26 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
             
         return None
     
-    def Cpty(self, request_iterator: Iterator[CptyRequest], context) -> Iterator[CptyResponse]:
+    async def Cpty(self, request_iterator, context):
         """Main CPTY bidirectional streaming method."""
-        # Start async event loop in thread
-        import threading
+        logger.info("=== Cpty method called, starting bidirectional stream ===")
         
-        def run_async_loop():
-            asyncio.set_event_loop(self.loop)
-            self.loop.run_forever()
-        
-        self.async_thread = threading.Thread(target=run_async_loop, daemon=True)
-        self.async_thread.start()
+        # Initialize queues if not already done
+        if self.response_queue is None:
+            self.response_queue = asyncio.Queue()
+        if self.orderflow_queue is None:
+            self.orderflow_queue = asyncio.Queue()
         
         try:
             # Process requests
-            for request in request_iterator:
+            logger.info("Waiting for requests from async iterator...")
+            async for request in request_iterator:
                 logger.info(f"Received request: {type(request).__name__}")
                 
                 # Handle request asynchronously
-                future = asyncio.run_coroutine_threadsafe(
-                    self._handle_request(request),
-                    self.loop
-                )
-                
-                # Get response (with timeout)
-                try:
-                    response = future.result(timeout=5.0)
-                    if response:
-                        yield response
-                except asyncio.TimeoutError:
-                    logger.error("Request handling timed out")
+                response = await self._handle_request(request)
+                if response:
+                    yield response
                 
                 # Check for async updates
                 while not self.response_queue.empty():
@@ -767,11 +755,6 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
             logger.error(f"CPTY error: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
-        finally:
-            # Cleanup
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            if self.async_thread:
-                self.async_thread.join(timeout=5.0)
     
     def SubscribeOrderflow(self, request: DropcopyRequest, context) -> Iterator[Orderflow]:
         """Subscribe to orderflow updates."""
