@@ -26,6 +26,7 @@ from architect_py.grpc.models.definitions import (
     OrderAck
 )
 from architect_py.grpc.models.Orderflow import Orderflow, DropcopyRequest
+from architect_py.grpc.models.Orderflow.Orderflow import TaggedOrderAck
 from architect_py import TimeInForce
 
 # Extract nested types from CptyRequest
@@ -430,8 +431,16 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
             
             logger.info(f"Order placed successfully: {order.cl_ord_id} -> {tx_hash_str}")
             
-            # Note: OrderAck is handled by Architect Core based on the ReconcileOrder response
-            # The CPTY sends ReconcileOrder which Core converts to OrderAck for clients
+            # Send OrderAck through orderflow
+            order_ack = TaggedOrderAck.new(
+                order_id=order.cl_ord_id,
+                exchange_order_id=tx_hash_str
+            )
+            self.loop.call_soon_threadsafe(
+                self.orderflow_queue.put_nowait,
+                order_ack
+            )
+            logger.info(f"Sent OrderAck for order {order.cl_ord_id}")
             
             return {
                 "order_id": tx_hash_str,
