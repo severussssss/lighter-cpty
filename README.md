@@ -21,8 +21,8 @@ A gRPC-based counterparty (CPTY) integration that enables Architect to trade on 
 
 ```bash
 # Create virtual environment
-python3.12 -m venv venv312
-source venv312/bin/activate
+python3.12 -m venv lighter_env
+source lighter_env/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt

@@ -22,7 +22,8 @@ from architect_py.grpc.server import CptyServicer, OrderflowServicer
 from architect_py.grpc.models.Cpty import CptyRequest, CptyResponse
 from architect_py.grpc.models.Oms import Order, Cancel
 from architect_py.grpc.models.definitions import (
-    OrderDir, OrderType, OrderStatus, CptyLoginRequest, CptyLogoutRequest
+    OrderDir, OrderType, OrderStatus, CptyLoginRequest, CptyLogoutRequest,
+    OrderAck
 )
 from architect_py.grpc.models.Orderflow import Orderflow, DropcopyRequest
 from architect_py import TimeInForce
@@ -83,6 +84,9 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
         
         # Response queue for async updates
         self.response_queue: asyncio.Queue = asyncio.Queue()
+        
+        # Orderflow queue for streaming order updates
+        self.orderflow_queue: asyncio.Queue = asyncio.Queue()
         
         # Event loop for async operations
         self.loop = asyncio.new_event_loop()
@@ -426,6 +430,9 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
             
             logger.info(f"Order placed successfully: {order.cl_ord_id} -> {tx_hash_str}")
             
+            # Note: OrderAck is handled by Architect Core based on the ReconcileOrder response
+            # The CPTY sends ReconcileOrder which Core converts to OrderAck for clients
+            
             return {
                 "order_id": tx_hash_str,
                 "client_order_id": order.cl_ord_id,
@@ -759,16 +766,22 @@ class LighterCptyServicer(CptyServicer, OrderflowServicer):
     
     def SubscribeOrderflow(self, request: DropcopyRequest, context) -> Iterator[Orderflow]:
         """Subscribe to orderflow updates."""
-        # This would stream orderflow events
-        # For now, just yield from response queue
+        logger.info(f"Orderflow subscription started for account: {request.account_id}")
+        
         while True:
             try:
-                if not self.response_queue.empty():
-                    update = self.response_queue.get_nowait()
-                    # Convert CptyResponse to Orderflow if needed
-                    yield update
+                # Check orderflow queue for updates
+                if not self.orderflow_queue.empty():
+                    try:
+                        orderflow_event = self.orderflow_queue.get_nowait()
+                        yield orderflow_event
+                    except asyncio.QueueEmpty:
+                        pass
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.01)  # Small sleep to prevent busy waiting
+                    
             except Exception as e:
                 logger.error(f"Orderflow subscription error: {e}")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(str(e))
                 break
