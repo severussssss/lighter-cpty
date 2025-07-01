@@ -203,15 +203,19 @@ class LighterWebSocketClient:
         """Handle account messages."""
         channel = data.get("channel", "")
         
+        # Log the full message for debugging
+        logger.debug(f"Account message: {data}")
+        
         # Extract account ID from channel
         parts = channel.replace(":", "/").split("/")
         if len(parts) >= 2:
             try:
                 account_id = int(parts[1])
-                account_data = data.get("account", data.get("data", {}))
                 
+                # The account data is the entire message
+                # Pass the full data to preserve all fields including positions, trades, etc.
                 if self.on_account:
-                    self.on_account(account_id, account_data)
+                    self.on_account(account_id, data)
                     
             except (ValueError, IndexError) as e:
                 logger.error(f"Failed to parse account ID from channel {channel}: {e}")

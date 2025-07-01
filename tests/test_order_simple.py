@@ -1,97 +1,161 @@
 #!/usr/bin/env python3
-"""Simple test of FARTCOIN order lifecycle."""
+"""Simple test to verify order placement works."""
 import asyncio
-from datetime import datetime
-from LighterCpty.lighter_cpty import LighterCptyServicer
-from architect_py.grpc.models.definitions import OrderDir, OrderType
-from architect_py import TimeInForce
-from dotenv import load_dotenv
+import logging
+import sys
+from pathlib import Path
+from decimal import Decimal
 
+# Add paths
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "architect-py"))
+
+from dotenv import load_dotenv
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(message)s'
+)
 
-async def test_order():
-    """Test FARTCOIN order lifecycle."""
-    cpty = LighterCptyServicer()
+
+async def test_order_placement():
+    """Test placing an order directly through the CPTY."""
+    from LighterCpty.lighter_cpty_async import LighterCpty
+    from architect_py import (
+        Order, OrderDir, OrderType, OrderStatus, 
+        TimeInForce, CptyLoginRequest
+    )
     
-    print("=== FARTCOIN Order Test ===\n")
+    logger = logging.getLogger(__name__)
     
-    # 1. Login
-    class MockLogin:
-        user_id = "test_trader"
-        account_id = "30188"
+    # Create CPTY instance
+    cpty = LighterCpty()
+    logger.info("Created CPTY instance")
     
-    class MockLoginRequest:
-        login = MockLogin()
+    # Simulate login
+    login_req = CptyLoginRequest(
+        trader="test_trader",
+        account="30188"
+    )
     
-    print("1. Logging in...")
-    await cpty._handle_request(MockLoginRequest())
+    try:
+        await cpty.on_login(login_req)
+        logger.info("✓ Login successful")
+    except Exception as e:
+        logger.error(f"Login failed: {e}")
+        return False
+    
+    # Wait for initialization
     await asyncio.sleep(2)
     
-    print(f"   Logged in: {cpty.logged_in}")
-    print(f"   WebSocket: {cpty.ws_connected}")
+    # Create test order
+    test_order = Order(
+        id="test-simple-001",
+        account="30188",
+        trader="test_trader",
+        symbol="FARTCOIN-USDC LIGHTER Perpetual/USDC Crypto",
+        dir=OrderDir.BUY,
+        quantity=Decimal("100"),
+        order_type=OrderType.Limit,
+        limit_price=Decimal("0.00001"),
+        time_in_force=TimeInForce.GoodTillCancel,
+        status=OrderStatus.Pending,
+        recv_time=int(asyncio.get_event_loop().time()),
+        recv_time_ns=0,
+        source=0,
+        execution_venue="LIGHTER"
+    )
     
-    # 2. Place FARTCOIN order
-    order_id = f"fartcoin_{int(datetime.now().timestamp())}"
+    logger.info(f"\n=== Placing Order ===")
+    logger.info(f"Order ID: {test_order.id}")
+    logger.info(f"Symbol: {test_order.symbol}")
+    logger.info(f"Side: {test_order.dir}")
+    logger.info(f"Quantity: {test_order.quantity}")
+    logger.info(f"Price: {test_order.limit_price}")
     
-    class MockOrder:
-        cl_ord_id = order_id
-        symbol = "FARTCOIN-USDC LIGHTER Perpetual/USDC Crypto"
-        dir = OrderDir.BUY
-        price = "1.09"
-        qty = "20"
-        type = OrderType.LIMIT
-        tif = TimeInForce.GTC
-        reduce_only = False
-        post_only = True
+    # Track order events
+    order_events = []
     
-    class MockPlaceRequest:
-        place_order = MockOrder()
+    # Mock the event methods to capture what happens
+    original_ack = cpty.ack_order
+    original_reject = cpty.reject_order
     
-    print(f"\n2. Placing order {order_id}...")
-    response = await cpty._handle_request(MockPlaceRequest())
-    if response and hasattr(response, 'reconcile_order'):
-        print(f"   ✓ Order placed: {response.reconcile_order.ord_id}")
+    def track_ack(order_id, exchange_order_id=None):
+        order_events.append(('ACK', order_id, exchange_order_id))
+        logger.info(f"✓ Order acknowledged: {order_id} -> {exchange_order_id}")
+        return original_ack(order_id, exchange_order_id=exchange_order_id)
     
-    # 3. Check open orders
-    print("\n3. Checking open orders...")
-    print(f"   Tracked orders: {len(cpty.orders)}")
-    for cl_ord_id, order in cpty.orders.items():
-        print(f"   - {cl_ord_id}: ${order.price} x {order.qty}")
+    def track_reject(order_id, reject_reason, reject_message=None):
+        order_events.append(('REJECT', order_id, reject_reason, reject_message))
+        logger.error(f"✗ Order rejected: {order_id} - {reject_reason}: {reject_message}")
+        return original_reject(order_id, reject_reason=reject_reason, reject_message=reject_message)
     
-    # 4. Cancel order
-    class MockCancel:
-        cl_ord_id = order_id
-        orig_cl_ord_id = order_id
+    cpty.ack_order = track_ack
+    cpty.reject_order = track_reject
     
-    class MockCancelOrder:
-        cancel = MockCancel()
+    try:
+        # Place the order
+        await cpty.on_place_order(test_order)
+        
+        # Wait for order processing
+        await asyncio.sleep(3)
+        
+        # Check results
+        logger.info(f"\n=== Results ===")
+        logger.info(f"Order events: {len(order_events)}")
+        
+        if order_events:
+            for event in order_events:
+                logger.info(f"  {event}")
+            
+            # Check if order reached exchange
+            if cpty.client_to_exchange_id.get(test_order.id):
+                exchange_id = cpty.client_to_exchange_id[test_order.id]
+                logger.info(f"\n✅ SUCCESS: Order reached Lighter exchange!")
+                logger.info(f"   Client Order ID: {test_order.id}")
+                logger.info(f"   Exchange Order ID: {exchange_id}")
+                return True
+            else:
+                logger.warning("\n⚠️  Order acknowledged but no exchange ID recorded")
+        else:
+            logger.error("\n✗ FAILED: No order events received")
+            
+    except Exception as e:
+        logger.error(f"Order placement error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Restore original methods
+        cpty.ack_order = original_ack
+        cpty.reject_order = original_reject
+        
+        # Logout
+        await cpty.on_logout(None)
     
-    class MockCancelRequest:
-        cancel_order = MockCancelOrder()
-    
-    print(f"\n4. Cancelling order...")
-    response = await cpty._handle_request(MockCancelRequest())
-    if response and hasattr(response, 'reconcile_order'):
-        print(f"   ✓ Order cancelled")
-    
-    # 5. Check WebSocket updates
-    print("\n5. WebSocket updates:")
-    count = 0
-    while not cpty.response_queue.empty() and count < 5:
-        update = await cpty.response_queue.get()
-        count += 1
-        print(f"   - Update {count}: {type(update).__name__}")
-    
-    # 6. Logout
-    class MockLogoutRequest:
-        logout = True
-    
-    print("\n6. Logging out...")
-    await cpty._handle_request(MockLogoutRequest())
-    
-    print("\n=== Complete ===")
+    return False
+
+
+async def main():
+    """Run the test with timeout."""
+    try:
+        # Run test with timeout
+        result = await asyncio.wait_for(test_order_placement(), timeout=15.0)
+        
+        if result:
+            print("\n✅ Test passed! Orders are reaching the Lighter exchange through the CPTY.")
+        else:
+            print("\n❌ Test failed! Check the logs above for details.")
+            sys.exit(1)
+            
+    except asyncio.TimeoutError:
+        print("\n❌ Test timed out!")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Test error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    asyncio.run(test_order())
+    asyncio.run(main())

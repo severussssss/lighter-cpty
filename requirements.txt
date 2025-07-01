@@ -1,5 +1,5 @@
 # Architect integration
-architect-py==5.1.3
+architect-py==5.1.6
 
 # Lighter SDK
 lighter-sdk @ git+https://github.com/elliottech/lighter-python.git
