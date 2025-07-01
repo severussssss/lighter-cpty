@@ -40,7 +40,7 @@ async def main():
     
     # Order parameters - using a more realistic price
     order_id = f"fart-{uuid.uuid4().hex[:8]}"
-    limit_price = Decimal("0.5")  # More realistic price for FARTCOIN
+    limit_price = Decimal("0.699")  # More realistic price for FARTCOIN
     amount = Decimal("100")
     
     print(f"\n=== Placing Order ===")

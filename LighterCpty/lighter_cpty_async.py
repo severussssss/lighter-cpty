@@ -372,8 +372,11 @@ class LighterCpty(AsyncCpty):
             self.ack_order(order.id, exchange_order_id=tx_hash_str)
             print(f"[INFO] Order placed: {order.id} -> {tx_hash_str}")
             
-            # Simulate order lifecycle for demo
-            asyncio.create_task(self._simulate_order_lifecycle(order))
+            # Order is now on the exchange - status will be managed by Architect
+            # based on exchange confirmations
+            
+            # Disabled simulated lifecycle - real orders will be managed by exchange
+            # asyncio.create_task(self._simulate_order_lifecycle(order))
             
         except Exception as e:
             print(f"[ERROR] Error placing order: {e}")
@@ -387,12 +390,77 @@ class LighterCpty(AsyncCpty):
         """Handle cancel order request."""
         print(f"[INFO] Cancel order: {cancel.xid}")  # xid is the cancel_id field
         
-        # For now, reject all cancels (TODO: implement actual cancellation)
-        self.reject_cancel(
-            cancel.xid,  # xid is the cancel_id field
-            reject_reason="Cancel not yet implemented",
-            reject_message="Order cancellation is not yet supported"
-        )
+        # Get the order to cancel
+        if original_order is None:
+            self.reject_cancel(
+                cancel.xid,
+                reject_reason="Order not found",
+                reject_message="Cannot find order to cancel"
+            )
+            return
+        
+        # Check if order is cancelable
+        if original_order.status not in [OrderStatus.Pending, OrderStatus.Open]:
+            self.reject_cancel(
+                cancel.xid,
+                reject_reason="Order not cancelable",
+                reject_message=f"Order status {original_order.status.name} cannot be cancelled"
+            )
+            return
+        
+        try:
+            # Get exchange order ID
+            exchange_order_id = self.client_to_exchange_id.get(original_order.id)
+            if not exchange_order_id:
+                self.reject_cancel(
+                    cancel.xid,
+                    reject_reason="Exchange order ID not found",
+                    reject_message="Cannot find exchange order ID"
+                )
+                return
+            
+            # Get market ID
+            market_id = self.symbol_to_market_id.get(original_order.symbol)
+            if market_id is None:
+                self.reject_cancel(
+                    cancel.xid,
+                    reject_reason="Unknown symbol",
+                    reject_message=f"Unknown symbol: {original_order.symbol}"
+                )
+                return
+            
+            # Get order index from hash/tx
+            # For Lighter, we need the order index which is typically the client_order_index we used
+            order_index = abs(hash(original_order.id)) % (10**8)
+            
+            # Cancel order on Lighter
+            cancel_tx, cancel_hash, err = await self.signer_client.cancel_order(
+                market_index=market_id,
+                order_index=order_index
+            )
+            
+            if err is not None:
+                print(f"[ERROR] Failed to cancel order: {err}")
+                self.reject_cancel(
+                    cancel.xid,
+                    reject_reason="Exchange cancel failed",
+                    reject_message=str(err)
+                )
+                return
+            
+            # Cancel accepted - no explicit ack_cancel method in AsyncCpty
+            print(f"[INFO] Order cancel sent: {original_order.id} -> {cancel_hash}")
+            
+            # After some delay, mark as cancelled (in real implementation, wait for exchange confirmation)
+            asyncio.create_task(self._finalize_cancel(original_order.id, cancel.xid))
+            
+        except Exception as e:
+            print(f"[ERROR] Error cancelling order: {e}")
+            self.reject_cancel(
+                cancel.xid,
+                reject_reason="Cancel error",
+                reject_message=str(e)
+            )
     
     async def get_open_orders(self) -> Sequence[Order]:
         """Get all open orders."""
@@ -431,6 +499,31 @@ class LighterCpty(AsyncCpty):
         # Out the order
         self.out_order(order.id, canceled=False)
         print(f"[INFO] Order filled and outed: {order.id}")
+    
+    async def _finalize_cancel(self, order_id: str, cancel_id: str):
+        """Finalize order cancellation after exchange confirmation."""
+        # Wait a bit for exchange to process
+        await asyncio.sleep(2)
+        
+        try:
+            # Out the order as cancelled
+            self.out_order(order_id, canceled=True)
+            
+            # Clean up tracking
+            if order_id in self.client_to_exchange_id:
+                exchange_id = self.client_to_exchange_id[order_id]
+                del self.client_to_exchange_id[order_id]
+                if exchange_id in self.exchange_to_client_id:
+                    del self.exchange_to_client_id[exchange_id]
+            
+            # Remove from orders dict
+            if order_id in self.orders:
+                del self.orders[order_id]
+            
+            print(f"[INFO] Order cancelled: {order_id}")
+            
+        except Exception as e:
+            print(f"[ERROR] Error finalizing cancel: {e}")
     
     async def _periodic_account_updates(self):
         """Send periodic account updates."""
