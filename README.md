@@ -9,6 +9,9 @@ A gRPC-based counterparty (CPTY) integration that enables Architect to trade on 
 - ✅ Real-time WebSocket updates for order status and fills
 - ✅ Automatic symbol mapping between Architect and Lighter formats
 - ✅ Market-specific decimal precision handling
+- ✅ Async implementation for better performance and concurrency
+- ✅ Cancel all orders support (both native and synthetic)
+- ✅ Automatic balance monitoring and reporting
 
 ## Quick Start
 
@@ -42,10 +45,10 @@ LIGHTER_URL=https://mainnet.zklighter.elliot.ai
 ### 4. Run the Server
 
 ```bash
-python lighter_cpty_server.py
+python -m LighterCpty.lighter_cpty_async
 ```
 
-The server will start on port 50051 and accept connections from Architect core.
+The async server will start on port 50051 and accept connections from Architect core.
 
 ## Supported Markets
 
@@ -94,14 +97,16 @@ Examples:
 lighter_cpty/
 ├── LighterCpty/
 │   ├── __init__.py
-│   ├── lighter_cpty.py      # Main CPTY implementation
-│   └── lighter_ws.py        # WebSocket client
-├── lighter_cpty_server.py   # gRPC server
-├── requirements.txt         # Python dependencies
-├── .env                     # Configuration (not in git)
-├── docs/                    # Documentation
-├── examples/                # Example scripts
-└── tests/                   # Test files
+│   ├── lighter_cpty_async.py  # Async CPTY implementation (main)
+│   ├── lighter_cpty.py        # Legacy sync implementation
+│   ├── balance_fetcher.py     # Balance monitoring
+│   ├── config_loader.py       # Configuration management
+│   └── grpc_server_patch.py   # gRPC server utilities
+├── requirements.txt           # Python dependencies
+├── .env                       # Configuration (not in git)
+├── docs/                      # Documentation
+├── examples/                  # Example scripts
+└── tests/                     # Test files
 ```
 
 ## Testing
