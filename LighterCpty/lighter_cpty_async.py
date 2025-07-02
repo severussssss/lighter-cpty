@@ -448,7 +448,9 @@ class LighterCpty(AsyncCpty):
             self.exchange_to_client_id[tx_hash_str] = order.id
             
             # Acknowledge order
+            print(f"[INFO] About to acknowledge order: {order.id}")
             self.ack_order(order.id, exchange_order_id=tx_hash_str)
+            print(f"[INFO] Order acknowledged: {order.id} -> {tx_hash_str}")
             print(f"[INFO] Order placed: {order.id} -> {tx_hash_str}")
             
             # Order is now on the exchange - fills will come through WebSocket
@@ -536,6 +538,77 @@ class LighterCpty(AsyncCpty):
                 reject_reason="Cancel error",
                 reject_message=str(e)
             )
+    
+    async def on_cancel_all_orders(
+        self,
+        account: Optional[str] = None,
+        execution_venue: Optional[str] = None,
+        trader: Optional[str] = None,
+    ):
+        """Handle cancel all orders request."""
+        print(f"[INFO] ========== CANCEL ALL ORDERS REQUEST ==========")
+        print(f"[INFO] Account: {account}, Venue: {execution_venue}, Trader: {trader}")
+        
+        if not self.logged_in or not self.signer_client:
+            print(f"[ERROR] Cannot cancel all - not logged in or client not initialized")
+            return
+        
+        try:
+            # Get current timestamp for cancel all
+            current_time = int(time.time())
+            
+            # Cancel all orders on Lighter
+            # time_in_force=0 means cancel all orders regardless of TIF
+            response, err = await self.signer_client.cancel_all_orders(
+                time_in_force=0,  # Cancel all orders regardless of time in force
+                time=current_time
+            )
+            
+            if err is not None:
+                print(f"[ERROR] Failed to cancel all orders: {err}")
+                return
+            
+            print(f"[INFO] Cancel all orders sent successfully")
+            
+            # Get list of our open orders to mark as cancelled
+            orders_to_cancel = []
+            for order_id, order in self.orders.items():
+                # Check filters
+                should_cancel = True
+                
+                # Filter by account if specified
+                if account and str(order.account) != str(account):
+                    should_cancel = False
+                    
+                # Filter by venue if specified (we only have LIGHTER)
+                if execution_venue and execution_venue != self.execution_venue:
+                    should_cancel = False
+                    
+                # Filter by trader if specified
+                if trader and str(order.trader) != str(trader):
+                    should_cancel = False
+                
+                # Only cancel open/pending orders
+                if order.status not in [OrderStatus.Pending, OrderStatus.Open]:
+                    should_cancel = False
+                    
+                if should_cancel:
+                    orders_to_cancel.append(order_id)
+            
+            print(f"[INFO] Marking {len(orders_to_cancel)} orders as cancelled")
+            
+            # Mark all matching orders as cancelled
+            for order_id in orders_to_cancel:
+                # Create a unique cancel ID for tracking
+                cancel_id = f"cancel_all_{int(time.time() * 1000)}_{order_id}"
+                asyncio.create_task(self._finalize_cancel(order_id, cancel_id))
+                
+            print(f"[INFO] Cancel all orders completed")
+            
+        except Exception as e:
+            print(f"[ERROR] Error in cancel all orders: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def get_open_orders(self) -> Sequence[Order]:
         """Get all open orders."""
