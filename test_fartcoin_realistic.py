@@ -40,8 +40,8 @@ async def main():
     
     # Order parameters - using a more realistic price
     order_id = f"fart-{uuid.uuid4().hex[:8]}"
-    limit_price = Decimal("0.699")  # More realistic price for FARTCOIN
-    amount = Decimal("100")
+    limit_price = Decimal("1.055")  # More realistic price for FARTCOIN
+    amount = Decimal("20")
     
     print(f"\n=== Placing Order ===")
     print(f"Order ID: {order_id}")
@@ -57,7 +57,7 @@ async def main():
             symbol=architect_symbol,
             execution_venue="LIGHTER",
             order_id=order_id,
-            dir=OrderDir.BUY,
+            dir=OrderDir.SELL, #OrderDir.BUY,
             limit_price=limit_price,
             quantity=amount,
             account=account_address,

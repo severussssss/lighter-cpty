@@ -150,6 +150,13 @@ class LighterWebSocketClient:
             except Exception as e:
                 logger.error(f"Error sending subscription: {e}")
     
+    async def _send_pong(self) -> None:
+        """Send pong response to server ping."""
+        if self.ws and self.ws.state.name == "OPEN":
+            pong_msg = {"type": "pong"}
+            await self.ws.send(json.dumps(pong_msg))
+            logger.debug("Sent pong response")
+    
     async def _handle_message(self, data: Dict[str, Any]) -> None:
         """Handle incoming WebSocket message."""
         msg_type = data.get("type")
@@ -176,8 +183,12 @@ class LighterWebSocketClient:
                           "subscribed/account_market", "update/account_market"]:
             await self._handle_account_message(data)
             
-        elif msg_type in ["subscribed/trade", "update/trade"]:
+        elif msg_type in ["subscribed/trade", "update/trade", "subscribed/trades", "update/trades"]:
             await self._handle_trade_message(data)
+            
+        elif msg_type == "ping":
+            # Respond to ping with pong
+            await self._send_pong()
             
         else:
             logger.debug(f"Unhandled message type: {msg_type}")
@@ -224,18 +235,34 @@ class LighterWebSocketClient:
         """Handle trade messages."""
         channel = data.get("channel", "")
         
-        # Extract market ID from channel
+        # Log the full trade message for debugging
+        logger.debug(f"Trade message on channel {channel}: {data}")
+        
+        # Extract ID from channel - could be market ID or account ID
         parts = channel.replace(":", "/").split("/")
         if len(parts) >= 2:
             try:
-                market_id = int(parts[1])
-                trade_data = data.get("trade", data.get("data", {}))
+                # For account-specific trades (trades:30188), the ID is the account index
+                # For market trades (trade:21), the ID is the market ID
+                id_value = int(parts[1])
                 
-                if self.on_trade:
-                    self.on_trade(market_id, trade_data)
+                # Check for trades in different fields
+                trades = data.get("trades", data.get("trade", data.get("data", {})))
+                
+                if trades and self.on_trade:
+                    # If trades is a list, process each trade
+                    if isinstance(trades, list):
+                        for trade in trades:
+                            # For account trades, pass the account ID as the first param
+                            self.on_trade(id_value, trade)
+                    # If trades is a dict, process it directly
+                    elif isinstance(trades, dict):
+                        # For dict format, iterate over the trades
+                        for trade_id, trade_data in trades.items():
+                            self.on_trade(id_value, trade_data)
                     
             except (ValueError, IndexError) as e:
-                logger.error(f"Failed to parse market ID from channel {channel}: {e}")
+                logger.error(f"Failed to parse ID from channel {channel}: {e}")
     
     async def subscribe_order_book(self, market_id: int) -> None:
         """Subscribe to order book updates."""
