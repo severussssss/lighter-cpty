@@ -554,14 +554,12 @@ class LighterCpty(AsyncCpty):
             return
         
         try:
-            # Get current timestamp for cancel all
-            current_time = int(time.time())
-            
             # Cancel all orders on Lighter
             # time_in_force=0 means cancel all orders regardless of TIF
+            # time=0 means cancel all immediately
             response, err = await self.signer_client.cancel_all_orders(
                 time_in_force=0,  # Cancel all orders regardless of time in force
-                time=current_time
+                time=0  # 0 means cancel all immediately
             )
             
             if err is not None:
@@ -704,17 +702,26 @@ class LighterCpty(AsyncCpty):
             # Get the order ID (it's the ask_id or bid_id depending on our side)
             lighter_order_id = trade_data.get("ask_id") if is_our_ask else trade_data.get("bid_id")
             
-            # Find the client order ID from our tracking
+            # Find the client order ID using tx_hash
+            tx_hash = trade_data.get("tx_hash")
             client_order_id = None
-            for client_id, order in self.orders.items():
-                # Match by order index (hash of client order ID)
-                expected_index = abs(hash(client_id)) % (10**8)
-                # The order ID in the trade might be the full order ID, not just the index
-                # Try to match the index portion
-                if str(expected_index) in str(lighter_order_id):
-                    client_order_id = client_id
-                    break
-                    
+            
+            if tx_hash:
+                client_order_id = self.exchange_to_client_id.get(tx_hash)
+                if client_order_id:
+                    print(f"[INFO] Matched trade {trade_id} to order {client_order_id} via tx_hash")
+                else:
+                    print(f"[WARNING] tx_hash {tx_hash} not found in exchange_to_client_id mapping")
+                    # Fall back to old matching logic
+                    for client_id, order in self.orders.items():
+                        expected_index = abs(hash(client_id)) % (10**8)
+                        if str(expected_index) in str(lighter_order_id):
+                            client_order_id = client_id
+                            print(f"[INFO] Matched trade {trade_id} to order {client_order_id} via index matching")
+                            break
+            else:
+                print(f"[WARNING] No tx_hash in trade data")
+                
             if not client_order_id:
                 print(f"[WARNING] Could not match trade {trade_id} to any known order")
                 return
