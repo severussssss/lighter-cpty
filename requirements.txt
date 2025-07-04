@@ -19,3 +19,6 @@ pandas==2.2.3
 
 # Cryptography (for Lighter SDK)
 pycryptodome==3.21.0
+
+# Redis
+redis==5.2.1

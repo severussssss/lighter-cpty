@@ -6,6 +6,9 @@ import time
 from typing import Optional, Dict, Any, Callable, Set
 import websockets
 from websockets.client import WebSocketClientProtocol
+from .redis_orderbook import RedisOrderbookClient
+from .orderbook_manager import OrderBookManager
+from .market_loader import load_market_info
 
 
 logger = logging.getLogger(__name__)
@@ -14,17 +17,30 @@ logger = logging.getLogger(__name__)
 class LighterWebSocketClient:
     """WebSocket client for Lighter real-time data using websockets library."""
     
-    def __init__(self, url: str, auth_token: Optional[str] = None):
+    def __init__(self, url: str, auth_token: Optional[str] = None, redis_url: Optional[str] = None, use_delta_orderbook: bool = True):
         """Initialize WebSocket client.
         
         Args:
             url: WebSocket URL (e.g., wss://testnet.zklighter.elliot.ai/stream)
             auth_token: Optional authentication token
+            redis_url: Optional Redis URL for orderbook storage
+            use_delta_orderbook: Whether to use delta orderbook management (default: True)
         """
         self.url = url
         self.auth_token = auth_token
         self.ws: Optional[WebSocketClientProtocol] = None
         self.running = False
+        self.use_delta_orderbook = use_delta_orderbook
+        
+        # Redis client for orderbook storage
+        self.redis_client: Optional[RedisOrderbookClient] = None
+        self.orderbook_manager: Optional[OrderBookManager] = None
+        
+        if redis_url:
+            if use_delta_orderbook:
+                self.orderbook_manager = OrderBookManager(redis_url)
+            else:
+                self.redis_client = RedisOrderbookClient(redis_url)
         
         # Callbacks
         self.on_order_book: Optional[Callable[[int, Dict[str, Any]], None]] = None
@@ -44,10 +60,43 @@ class LighterWebSocketClient:
         self.reconnect_delay = 1.0
         self.max_reconnect_delay = 60.0
     
+    def set_market_info(self, market_id: int, market_info: Dict[str, Any]) -> None:
+        """Set market info for Redis key generation.
+        
+        Args:
+            market_id: Market ID
+            market_info: Market information including base_asset, quote_asset
+        """
+        if self.orderbook_manager:
+            self.orderbook_manager.set_market_info(market_id, market_info)
+        elif self.redis_client:
+            self.redis_client.set_market_info(market_id, market_info)
+    
     async def connect(self) -> None:
         """Connect to Lighter WebSocket."""
         try:
             logger.info(f"Connecting to Lighter WebSocket: {self.url}")
+            
+            # Connect to Redis if configured
+            if self.orderbook_manager:
+                self.orderbook_manager.connect()
+                logger.info("Connected to Redis with OrderBookManager for delta orderbook management")
+                
+                # Load and set market info
+                market_info = load_market_info()
+                for market_id, info in market_info.items():
+                    self.orderbook_manager.set_market_info(market_id, info)
+                logger.info(f"Loaded {len(market_info)} market definitions")
+                
+            elif self.redis_client:
+                self.redis_client.connect()
+                logger.info("Connected to Redis for orderbook storage")
+                
+                # Load and set market info
+                market_info = load_market_info()
+                for market_id, info in market_info.items():
+                    self.redis_client.set_market_info(market_id, info)
+                logger.info(f"Loaded {len(market_info)} market definitions")
             
             # Prepare headers with auth if available
             headers = {}
@@ -96,6 +145,12 @@ class LighterWebSocketClient:
         if self.ws:
             await self.ws.close()
             self.ws = None
+        
+        # Disconnect from Redis
+        if self.orderbook_manager:
+            self.orderbook_manager.disconnect()
+        elif self.redis_client:
+            self.redis_client.disconnect()
         
         if self.on_disconnected:
             self.on_disconnected()
@@ -196,6 +251,7 @@ class LighterWebSocketClient:
     async def _handle_order_book_message(self, data: Dict[str, Any]) -> None:
         """Handle order book messages."""
         channel = data.get("channel", "")
+        msg_type = data.get("type", "")
         
         # Extract market ID from channel (e.g., "order_book:0" or "order_book/0")
         parts = channel.replace(":", "/").split("/")
@@ -203,6 +259,14 @@ class LighterWebSocketClient:
             try:
                 market_id = int(parts[1])
                 order_book = data.get("order_book", data.get("data", {}))
+                
+                # Write to Redis if client is configured
+                if self.orderbook_manager and order_book:
+                    # Use OrderBookManager for proper delta handling
+                    self.orderbook_manager.handle_orderbook_message(msg_type, market_id, order_book)
+                elif self.redis_client and order_book:
+                    # Fallback to simple Redis client
+                    self.redis_client.write_orderbook(market_id, order_book)
                 
                 if self.on_order_book:
                     self.on_order_book(market_id, order_book)

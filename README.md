@@ -12,6 +12,8 @@ A gRPC-based counterparty (CPTY) integration that enables Architect to trade on 
 - ✅ Async implementation for better performance and concurrency
 - ✅ Cancel all orders support (both native and synthetic)
 - ✅ Automatic balance monitoring and reporting
+- ✅ Delta orderbook management with Redis storage
+- ✅ Dynamic market info loading from Lighter API
 
 ## Quick Start
 
@@ -99,6 +101,9 @@ lighter_cpty/
 │   ├── __init__.py
 │   ├── lighter_cpty_async.py  # Async CPTY implementation (main)
 │   ├── lighter_cpty.py        # Legacy sync implementation
+│   ├── lighter_ws.py          # WebSocket client with orderbook support
+│   ├── orderbook_manager.py   # Delta orderbook state management
+│   ├── market_loader.py       # Dynamic market info loading
 │   ├── balance_fetcher.py     # Balance monitoring
 │   ├── config_loader.py       # Configuration management
 │   └── grpc_server_patch.py   # gRPC server utilities
@@ -123,6 +128,7 @@ python examples/fartcoin_order_simple.py
 - [Production Usage Guide](docs/PRODUCTION_USAGE.md)
 - [Symbol Mapping Guide](docs/SYMBOL_MAPPING_GUIDE.md)
 - [End-to-End Test Results](docs/END_TO_END_TEST_RESULTS.md)
+- [Delta Orderbook Management](docs/delta_orderbook_management.md)
 
 ## License
 
