@@ -47,7 +47,7 @@ async def main():
     print(f"Order ID: {order_id}")
     print(f"Symbol: {architect_symbol}")
     print(f"Account: {account_address}")
-    print(f"Side: BUY")
+    print(f"Side: SELL")
     print(f"Quantity: {amount}")
     print(f"Price: {limit_price}")
     

@@ -11,9 +11,6 @@ from pathlib import Path
 from typing import Dict, Optional, Sequence
 from dotenv import load_dotenv
 
-# Add architect-py to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "architect-py"))
-
 # Architect imports
 from architect_py import (
     Cancel,
