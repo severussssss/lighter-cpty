@@ -44,13 +44,24 @@ LIGHTER_API_KEY_INDEX=1
 LIGHTER_URL=https://mainnet.zklighter.elliot.ai
 ```
 
-### 4. Run the Server
+### 4. Run the Services
+
+Start both the CPTY server and orderbook streamer:
 
 ```bash
-python -m LighterCpty.lighter_cpty_async
+./start_lighter_services.sh
 ```
 
-The async server will start on port 50051 and accept connections from Architect core.
+This starts:
+- CPTY server on port 50051 for Architect core connections
+- Orderbook streamer for real-time L2 data to Redis
+
+Check status:
+```bash
+./check_lighter_status.sh
+```
+
+See [SERVICE_MANAGEMENT.md](SERVICE_MANAGEMENT.md) for detailed service management.
 
 ## Supported Markets
 
@@ -125,6 +136,7 @@ python examples/fartcoin_order_simple.py
 
 ## Documentation
 
+- [Service Management Guide](SERVICE_MANAGEMENT.md)
 - [Production Usage Guide](docs/PRODUCTION_USAGE.md)
 - [Symbol Mapping Guide](docs/SYMBOL_MAPPING_GUIDE.md)
 - [End-to-End Test Results](docs/END_TO_END_TEST_RESULTS.md)
