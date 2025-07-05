@@ -47,8 +47,8 @@ tmux new-session -d -s $SESSION_NAME -n "cpty" \
     "cd $SCRIPT_DIR && $VENV_ACTIVATE && python -m LighterCpty.lighter_cpty_async; bash"
 
 # Create window for orderbook streamer (optimized version)
-tmux new-window -t $SESSION_NAME:1 -n "orderbook" \
-    "cd $SCRIPT_DIR && $VENV_ACTIVATE && python run_orderbook_streamer_optimized.py; bash"
+tmux new-window -t $SESSION_NAME:1 -n "l2_ws" \
+    "cd $SCRIPT_DIR && $VENV_ACTIVATE && python write_l2_books.py; bash"
 
 # Create window for monitoring
 tmux new-window -t $SESSION_NAME:2 -n "monitor" \

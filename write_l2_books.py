@@ -189,11 +189,20 @@ async def run_optimized_streamer():
     # Connect to Redis
     await manager.connect()
     
-    # Load market info
-    market_info = load_market_info()
-    for market_id, info in market_info.items():
-        manager.set_market_info(market_id, info)
-    logger.info(f"Loaded {len(market_info)} market definitions")
+    # Load market info with rate limit handling
+    try:
+        market_info = load_market_info()
+        for market_id, info in market_info.items():
+            manager.set_market_info(market_id, info)
+        logger.info(f"Loaded {len(market_info)} market definitions")
+    except Exception as e:
+        logger.warning(f"Failed to load market info from API: {e}")
+        logger.info("Using fallback market definitions")
+        # Use fallback if API is rate limited
+        from LighterCpty.market_loader import get_fallback_market_info
+        market_info = get_fallback_market_info()
+        for market_id, info in market_info.items():
+            manager.set_market_info(market_id, info)
     
     # Create WebSocket client without built-in Redis
     client = LighterWebSocketClient(
@@ -228,12 +237,34 @@ async def run_optimized_streamer():
     # Start batch writer
     batch_writer_task = asyncio.create_task(manager.run_batch_writer())
     
-    # Connect
+    # Connect with retry logic
     logger.info("Starting optimized orderbook streamer...")
-    connect_task = asyncio.create_task(client.connect())
+    max_retries = 5
+    retry_count = 0
     
-    # Wait for connection
-    await asyncio.sleep(2)
+    while retry_count < max_retries:
+        try:
+            connect_task = asyncio.create_task(client.connect())
+            # Wait for connection
+            await asyncio.sleep(5)
+            
+            # Check if we're actually connected
+            if client.ws and client.ws.state.name == "OPEN":
+                logger.info("Successfully connected to WebSocket")
+                break
+            else:
+                raise Exception("WebSocket not in OPEN state")
+                
+        except Exception as e:
+            retry_count += 1
+            wait_time = min(60, 10 * retry_count)  # Exponential backoff
+            logger.warning(f"Connection attempt {retry_count} failed: {e}")
+            if retry_count < max_retries:
+                logger.info(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("Max retries reached. Exiting.")
+                return
     
     # Subscribe to markets (can subscribe to more with optimized version)
     markets_to_stream = list(range(45))  # All markets!

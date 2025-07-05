@@ -1,5 +1,6 @@
 """Lighter CPTY implementation using architect-py's AsyncCpty base class."""
 import asyncio
+import argparse
 import logging
 import os
 import sys
@@ -10,6 +11,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 from dotenv import load_dotenv
+
+# Suppress debug logs from architect_py by default
+logging.getLogger('architect_py').setLevel(logging.INFO)
 
 # Architect imports
 from architect_py import (
@@ -25,6 +29,7 @@ from architect_py import (
     AccountPosition,
 )
 from architect_py.async_cpty import AsyncCpty
+import grpc
 
 # Lighter SDK imports
 import lighter
@@ -35,7 +40,7 @@ from lighter.exceptions import ApiException
 from .lighter_ws import LighterWebSocketClient
 from .balance_fetcher import LighterBalanceFetcher
 
-# logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class LighterCpty(AsyncCpty):
@@ -44,7 +49,7 @@ class LighterCpty(AsyncCpty):
     def __init__(self, config: Optional[Dict] = None):
         """Initialize Lighter CPTY."""
         super().__init__("LIGHTER")
-        print("[INFO] LighterCpty initialized")
+        logger.info("LighterCpty initialized")
         
         self.config = config or self._load_config_from_env()
         
@@ -79,12 +84,81 @@ class LighterCpty(AsyncCpty):
         # Initialize execution info
         self._init_execution_info()
     
+    def _put_orderflow_event(self, event):
+        """Override to add logging for debugging."""
+        logger.info(f"Putting orderflow event: {type(event).__name__} - {event}")
+        logger.info(f"Number of orderflow subscriptions: {len(self.orderflow_subscriptions)}")
+        
+        if len(self.orderflow_subscriptions) == 0:
+            logger.warning("No orderflow subscriptions active! Architect Core may not be connected.")
+        else:
+            # Log details about each subscription and queue
+            for sub_id, sub in self.orderflow_subscriptions.items():
+                logger.info(f"  Subscription #{sub_id}: Queue size = {sub.queue.qsize()}")
+                
+                # Log the event details based on type
+                if hasattr(event, '__dict__'):
+                    logger.info(f"  Event details: {vars(event)}")
+                
+                # For reject events, log specific fields
+                if type(event).__name__ == 'TaggedOrderReject':
+                    logger.info(f"  → Order ID: {event.id}")
+                    logger.info(f"  → Reject reason: {event.reject_reason}")
+                    logger.info(f"  → Reject message: {event.message}")
+                elif type(event).__name__ == 'TaggedOrderAck':
+                    logger.info(f"  → Order ID: {event.order_id}")
+                    logger.info(f"  → Exchange order ID: {event.exchange_order_id}")
+                elif type(event).__name__ == 'TaggedFill':
+                    logger.info(f"  → Order ID: {event.order_id}")
+                    logger.info(f"  → Fill quantity: {event.quantity}")
+                    logger.info(f"  → Fill price: {event.price}")
+        
+        # Call parent method to actually put the event
+        super()._put_orderflow_event(event)
+        
+        # After putting the event, check if it's actually in the queue
+        for sub_id, sub in self.orderflow_subscriptions.items():
+            logger.info(f"  After put: Subscription #{sub_id} queue size = {sub.queue.qsize()}")
+    
+    async def SubscribeOrderflow(self, request, context):
+        """Override to add logging when Architect Core subscribes."""
+        logger.info(f"Architect Core subscribing to orderflow: {request}")
+        logger.info(f"Subscription request details: {vars(request) if hasattr(request, '__dict__') else request}")
+        
+        # Don't call super() - implement the subscription ourselves to properly intercept events
+        from architect_py.async_cpty import OrderflowSubscription
+        
+        context.set_code(grpc.StatusCode.OK)
+        await context.send_initial_metadata([])
+        
+        subscription_id = self.next_subscription_id
+        self.next_subscription_id += 1
+        logger.info(f"Created orderflow subscription #{subscription_id}")
+        
+        def cleanup_subscription(_context):
+            if subscription_id in self.orderflow_subscriptions:
+                del self.orderflow_subscriptions[subscription_id]
+                logger.info(f"Cleaned up orderflow subscription #{subscription_id}")
+        
+        context.add_done_callback(cleanup_subscription)
+        subscription = OrderflowSubscription(request)
+        self.orderflow_subscriptions[subscription_id] = subscription
+        
+        event_count = 0
+        while True:
+            next_item = await subscription.queue.get()
+            event_count += 1
+            logger.info(f"=== YIELDING ORDERFLOW EVENT #{event_count} ===")
+            logger.info(f"  Event type: {type(next_item).__name__}")
+            logger.info(f"  Event content: {next_item}")
+            yield next_item
+    
     def _load_config_from_env(self) -> Dict:
         """Load configuration from environment variables."""
         env_path = Path(__file__).parent.parent.parent.parent.parent.parent / "lighter-python" / "examples" / ".env"
         if env_path.exists():
             load_dotenv(env_path)
-            print(f"[INFO] Loaded .env from {env_path}")
+            logger.info(f"Loaded .env from {env_path}")
         
         return {
             "url": os.getenv("LIGHTER_URL", "https://mainnet.zklighter.elliot.ai"),
@@ -147,10 +221,10 @@ class LighterCpty(AsyncCpty):
             # Check client validity
             err = self.signer_client.check_client()
             if err is not None:
-                print(f"[ERROR] Signer client check failed: {err}")
+                logger.error(f"Signer client check failed: {err}")
                 return False
             
-            print("[INFO] Lighter SDK clients initialized successfully")
+            logger.info("Lighter SDK clients initialized successfully")
             
             # Initialize WebSocket
             await self._init_websocket()
@@ -158,7 +232,7 @@ class LighterCpty(AsyncCpty):
             return True
             
         except Exception as e:
-            print(f"[ERROR] Failed to initialize clients: {e}")
+            logger.error(f"Failed to initialize clients: {e}")
             return False
     
     async def _init_websocket(self):
@@ -184,10 +258,10 @@ class LighterCpty(AsyncCpty):
             # Subscribe to account updates after a short delay
             asyncio.create_task(self._initial_subscriptions())
             
-            print("[INFO] WebSocket client initialized")
+            logger.info("WebSocket client initialized")
             
         except Exception as e:
-            print(f"[ERROR] Failed to initialize WebSocket: {e}")
+            logger.error(f"Failed to initialize WebSocket: {e}")
     
     async def _initial_subscriptions(self):
         """Set up initial WebSocket subscriptions."""
@@ -201,22 +275,22 @@ class LighterCpty(AsyncCpty):
             if self.ws_connected and self.ws_client and self.account_index:
                 # Subscribe to account updates
                 await self.ws_client.subscribe_account(self.account_index)
-                print(f"[INFO] Subscribed to account_all/{self.account_index}")
+                logger.info(f"Subscribed to account_all/{self.account_index}")
                 
         except Exception as e:
-            print(f"[ERROR] Failed to set up subscriptions: {e}")
+            logger.error(f"Failed to set up subscriptions: {e}")
     
     async def _run_websocket(self):
         """Run WebSocket client."""
         try:
             await self.ws_client.run()
         except Exception as e:
-            print(f"[ERROR] WebSocket error: {e}")
+            logger.error(f"WebSocket error: {e}")
             self.ws_connected = False
     
     def _on_ws_connected(self):
         """Handle WebSocket connection."""
-        print("[INFO] WebSocket connected")
+        logger.info("WebSocket connected")
         self.ws_connected = True
         # Note: The WebSocket will automatically subscribe to account updates
         # after connection via _resubscribe_all() in the WebSocket handler
@@ -232,40 +306,40 @@ class LighterCpty(AsyncCpty):
             }
             await self.ws_client.pending_subscriptions.put(subscription)
             self.ws_client.subscriptions.add(channel)
-            print(f"[INFO] Subscribed to account_market for market {market_id}")
+            logger.info(f"Subscribed to account_market for market {market_id}")
     
     def _on_ws_disconnected(self):
         """Handle WebSocket disconnection."""
-        print("[WARNING] WebSocket disconnected")
+        logger.warning("WebSocket disconnected")
         self.ws_connected = False
     
     def _on_ws_error(self, error: Exception):
         """Handle WebSocket errors."""
-        print(f"[ERROR] WebSocket error: {error}")
+        logger.error(f"WebSocket error: {error}")
     
     def _on_trade_update(self, market_id: int, trade: Dict):
         """Handle trade updates from WebSocket."""
         try:
-            print(f"[INFO] Trade update for market {market_id}: {trade}")
+            logger.info(f"Trade update for market {market_id}: {trade}")
             
             # Process the trade as a fill
             self._process_single_fill(trade)
             
         except Exception as e:
-            print(f"[ERROR] Error processing trade update: {e}")
+            logger.error(f"Error processing trade update: {e}")
     
     def _on_account_update(self, account_id: int, account: Dict):
         """Handle account updates from WebSocket."""
         try:
-            print(f"[INFO] Account update for {account_id}")
+            logger.info(f"Account update for {account_id}")
             self.latest_account_data = account
             
             # Log trades field for debugging
             trades = account.get("trades", {})
             if trades:
-                print(f"[INFO] Trades in account update: {trades}")
+                logger.info(f"Trades in account update: {trades}")
             else:
-                print(f"[DEBUG] Empty trades field in account update")
+                logger.debug(f"Empty trades field in account update")
             
             # Check if trade counts changed
             new_total_trades = account.get("total_trades_count", 0)
@@ -276,7 +350,7 @@ class LighterCpty(AsyncCpty):
                 self._last_trade_counts = {'total': 0, 'daily': 0}
             
             if new_total_trades > self._last_trade_counts['total']:
-                print(f"[INFO] New trades detected! Total: {self._last_trade_counts['total']} -> {new_total_trades}")
+                logger.info(f"New trades detected! Total: {self._last_trade_counts['total']} -> {new_total_trades}")
                 # Fetch recent trades via API
                 asyncio.create_task(self._fetch_and_process_recent_trades())
             
@@ -286,19 +360,19 @@ class LighterCpty(AsyncCpty):
             # Log any trade-related fields
             for key in account:
                 if "trade" in key.lower() or "fill" in key.lower():
-                    print(f"[DEBUG] {key}: {account[key]}")
+                    logger.debug(f"{key}: {account[key]}")
             
             # Extract balance
             balance = LighterBalanceFetcher.parse_ws_account_update(account)
             if balance is not None:
                 self.latest_balance = balance
-                print(f"[INFO] Updated balance: {balance}")
+                logger.info(f"Updated balance: {balance}")
             else:
                 # Try to calculate equity
                 equity = LighterBalanceFetcher.calculate_account_equity(account)
                 if equity is not None:
                     self.latest_balance = equity
-                    print(f"[INFO] Calculated equity: {equity}")
+                    logger.info(f"Calculated equity: {equity}")
             
             # Process any order fills in the account data
             self._process_order_fills(account)
@@ -307,7 +381,7 @@ class LighterCpty(AsyncCpty):
             asyncio.create_task(self._broadcast_account_update())
             
         except Exception as e:
-            print(f"[ERROR] Error processing account update: {e}")
+            logger.error(f"Error processing account update: {e}")
     
     async def _broadcast_account_update(self):
         """Broadcast account update to all connections."""
@@ -354,10 +428,16 @@ class LighterCpty(AsyncCpty):
             positions=positions,
         )
     
+    async def Cpty(self, request_iterator, context):
+        """Override to add logging when Architect Core connects."""
+        logger.info("========== ARCHITECT CORE CONNECTED TO CPTY STREAM ==========")
+        async for response in super().Cpty(request_iterator, context):
+            yield response
+    
     async def on_login(self, request: CptyLoginRequest):
         """Handle login request."""
-        print(f"[INFO] ========== LOGIN REQUEST RECEIVED ==========")
-        print(f"[INFO] Login request from trader={request.trader}, account={request.account}")
+        logger.info("========== LOGIN REQUEST RECEIVED ==========")
+        logger.info(f"Login request from trader={request.trader}, account={request.account}")
         
         self.user_id = request.trader
         self.account_id = request.account
@@ -373,21 +453,22 @@ class LighterCpty(AsyncCpty):
                 raise Exception("Failed to initialize Lighter clients")
         
         self.logged_in = True
-        print(f"[INFO] Login successful for user {self.user_id}")
+        logger.info(f"Login successful for user {self.user_id}")
         
         # Start periodic updates
-        asyncio.create_task(self._periodic_account_updates())
+        # DISABLED: Causing 429 rate limit errors - WebSocket updates are sufficient
+        # asyncio.create_task(self._periodic_account_updates())
     
     async def on_logout(self, request: CptyLogoutRequest):
         """Handle logout request."""
-        print("[INFO] Logout request received")
+        logger.info("Logout request received")
         self.logged_in = False
         self.user_id = None
         self.account_id = None
     
     async def on_place_order(self, order: Order):
         """Handle place order request."""
-        print(f"[INFO] Place order: {order}")
+        logger.info(f"Place order: {order}")
         
         if not self.logged_in or not self.signer_client:
             self.reject_order(
@@ -430,7 +511,7 @@ class LighterCpty(AsyncCpty):
             )
             
             if err is not None:
-                print(f"[ERROR] Failed to place order: {err}")
+                logger.error(f"Failed to place order: {err}")
                 self.reject_order(
                     order.id,
                     reject_reason=OrderRejectReason.ExchangeReject,
@@ -445,15 +526,18 @@ class LighterCpty(AsyncCpty):
             self.exchange_to_client_id[tx_hash_str] = order.id
             
             # Acknowledge order
-            print(f"[INFO] About to acknowledge order: {order.id}")
+            logger.info(f"About to acknowledge order: {order.id}")
             self.ack_order(order.id, exchange_order_id=tx_hash_str)
-            print(f"[INFO] Order acknowledged: {order.id} -> {tx_hash_str}")
-            print(f"[INFO] Order placed: {order.id} -> {tx_hash_str}")
+            logger.info(f"Order acknowledged: {order.id} -> {tx_hash_str}")
+            logger.info(f"Order placed: {order.id} -> {tx_hash_str}")
+            
+            # Debug: Check orderflow subscriptions
+            logger.info(f"Active orderflow subscriptions: {len(self.orderflow_subscriptions)}")
             
             # Order is now on the exchange - fills will come through WebSocket
             
         except Exception as e:
-            print(f"[ERROR] Error placing order: {e}")
+            logger.error(f"Error placing order: {e}")
             self.reject_order(
                 order.id,
                 reject_reason=OrderRejectReason.InvalidOrder,
@@ -462,7 +546,7 @@ class LighterCpty(AsyncCpty):
     
     async def on_cancel_order(self, cancel: Cancel, original_order: Optional[Order] = None):
         """Handle cancel order request."""
-        print(f"[INFO] Cancel order: {cancel.xid}")  # xid is the cancel_id field
+        logger.info(f"Cancel order: {cancel.xid}")  # xid is the cancel_id field
         
         # Get the order to cancel
         if original_order is None:
@@ -514,7 +598,7 @@ class LighterCpty(AsyncCpty):
             )
             
             if err is not None:
-                print(f"[ERROR] Failed to cancel order: {err}")
+                logger.error(f"Failed to cancel order: {err}")
                 self.reject_cancel(
                     cancel.xid,
                     reject_reason="Exchange cancel failed",
@@ -523,13 +607,13 @@ class LighterCpty(AsyncCpty):
                 return
             
             # Cancel accepted - no explicit ack_cancel method in AsyncCpty
-            print(f"[INFO] Order cancel sent: {original_order.id} -> {cancel_hash}")
+            logger.info(f"Order cancel sent: {original_order.id} -> {cancel_hash}")
             
             # After some delay, mark as cancelled (in real implementation, wait for exchange confirmation)
             asyncio.create_task(self._finalize_cancel(original_order.id, cancel.xid))
             
         except Exception as e:
-            print(f"[ERROR] Error cancelling order: {e}")
+            logger.error(f"Error cancelling order: {e}")
             self.reject_cancel(
                 cancel.xid,
                 reject_reason="Cancel error",
@@ -543,11 +627,11 @@ class LighterCpty(AsyncCpty):
         trader: Optional[str] = None,
     ):
         """Handle cancel all orders request."""
-        print(f"[INFO] ========== CANCEL ALL ORDERS REQUEST ==========")
-        print(f"[INFO] Account: {account}, Venue: {execution_venue}, Trader: {trader}")
+        logger.info("========== CANCEL ALL ORDERS REQUEST ==========")
+        logger.info(f"Account: {account}, Venue: {execution_venue}, Trader: {trader}")
         
         if not self.logged_in or not self.signer_client:
-            print(f"[ERROR] Cannot cancel all - not logged in or client not initialized")
+            logger.error("Cannot cancel all - not logged in or client not initialized")
             return
         
         try:
@@ -560,10 +644,10 @@ class LighterCpty(AsyncCpty):
             )
             
             if err is not None:
-                print(f"[ERROR] Failed to cancel all orders: {err}")
+                logger.error(f"Failed to cancel all orders: {err}")
                 return
             
-            print(f"[INFO] Cancel all orders sent successfully")
+            logger.info("Cancel all orders sent successfully")
             
             # Get list of our open orders to mark as cancelled
             orders_to_cancel = []
@@ -590,7 +674,7 @@ class LighterCpty(AsyncCpty):
                 if should_cancel:
                     orders_to_cancel.append(order_id)
             
-            print(f"[INFO] Marking {len(orders_to_cancel)} orders as cancelled")
+            logger.info(f"Marking {len(orders_to_cancel)} orders as cancelled")
             
             # Mark all matching orders as cancelled
             for order_id in orders_to_cancel:
@@ -598,10 +682,10 @@ class LighterCpty(AsyncCpty):
                 cancel_id = f"cancel_all_{int(time.time() * 1000)}_{order_id}"
                 asyncio.create_task(self._finalize_cancel(order_id, cancel_id))
                 
-            print(f"[INFO] Cancel all orders completed")
+            logger.info("Cancel all orders completed")
             
         except Exception as e:
-            print(f"[ERROR] Error in cancel all orders: {e}")
+            logger.error(f"Error in cancel all orders: {e}")
             import traceback
             traceback.print_exc()
     
@@ -617,33 +701,33 @@ class LighterCpty(AsyncCpty):
         """Process order fills from account WebSocket data."""
         try:
             # Debug: Log the structure of account data to understand the format
-            print(f"[DEBUG] _process_order_fills called")
+            logger.debug("_process_order_fills called")
             if "trades" in account_data or "recent_trades" in account_data or "orders" in account_data:
-                print(f"[DEBUG] Account data keys: {list(account_data.keys())}")
+                logger.debug(f"Account data keys: {list(account_data.keys())}")
             
             # Check trade counts
             total_trades = account_data.get("total_trades_count", 0)
             daily_trades = account_data.get("daily_trades_count", 0)
             if total_trades > 0 or daily_trades > 0:
-                print(f"[DEBUG] Trade counts - total: {total_trades}, daily: {daily_trades}")
+                logger.debug(f"Trade counts - total: {total_trades}, daily: {daily_trades}")
             
             # Check for trades/fills in the account data
             trades = account_data.get("trades", {})
             if trades and isinstance(trades, dict):
-                print(f"[INFO] Found trades for {len(trades)} markets in account update")
+                logger.info(f"Found trades for {len(trades)} markets in account update")
                 # Trades come as a dict with market IDs as keys, values are lists of trades
                 for market_id, market_trades in trades.items():
-                    print(f"[INFO] Processing {len(market_trades) if isinstance(market_trades, list) else 1} trades for market {market_id}")
+                    logger.info(f"Processing {len(market_trades) if isinstance(market_trades, list) else 1} trades for market {market_id}")
                     if isinstance(market_trades, list):
                         for trade_data in market_trades:
                             if isinstance(trade_data, dict):
                                 self._process_single_fill(trade_data)
                             else:
-                                print(f"[WARNING] Unexpected trade data format: {type(trade_data)}")
+                                logger.warning(f"Unexpected trade data format: {type(trade_data)}")
                     elif isinstance(market_trades, dict):
                         self._process_single_fill(market_trades)
                     else:
-                        print(f"[WARNING] Unexpected market trades format: {type(market_trades)}")
+                        logger.warning(f"Unexpected market trades format: {type(market_trades)}")
                     
             # Also check for "recent_trades" or "filled_orders"
             recent_trades = account_data.get("recent_trades", [])
@@ -668,7 +752,7 @@ class LighterCpty(AsyncCpty):
                             self._process_order_update(order_data.get("id", order_data.get("order_id")), order_data)
                     
         except Exception as e:
-            print(f"[ERROR] Error processing order fills: {e}")
+            logger.error(f"Error processing order fills: {e}")
             import traceback
             traceback.print_exc()
     
@@ -679,21 +763,21 @@ class LighterCpty(AsyncCpty):
             trade_id = str(trade_data.get("trade_id", ""))
             
             if not trade_id:
-                print(f"[WARNING] No trade_id in trade data: {trade_data}")
+                logger.warning(f"No trade_id in trade data: {trade_data}")
                 return
                 
             # Check if we've already processed this fill
             if trade_id in self._processed_fills:
                 return
                 
-            print(f"[INFO] Processing new trade {trade_id}")
+            logger.info(f"Processing new trade {trade_id}")
             
             # Determine which order was ours based on account ID
             is_our_ask = trade_data.get("ask_account_id") == self.account_index
             is_our_bid = trade_data.get("bid_account_id") == self.account_index
             
             if not (is_our_ask or is_our_bid):
-                print(f"[WARNING] Trade {trade_id} doesn't involve our account")
+                logger.warning(f"Trade {trade_id} doesn't involve our account")
                 return
             
             # Get the order ID (it's the ask_id or bid_id depending on our side)
@@ -706,29 +790,29 @@ class LighterCpty(AsyncCpty):
             if tx_hash:
                 client_order_id = self.exchange_to_client_id.get(tx_hash)
                 if client_order_id:
-                    print(f"[INFO] Matched trade {trade_id} to order {client_order_id} via tx_hash")
+                    logger.info(f"Matched trade {trade_id} to order {client_order_id} via tx_hash")
                 else:
-                    print(f"[WARNING] tx_hash {tx_hash} not found in exchange_to_client_id mapping")
+                    logger.warning(f"tx_hash {tx_hash} not found in exchange_to_client_id mapping")
                     # Fall back to old matching logic
                     for client_id, order in self.orders.items():
                         expected_index = abs(hash(client_id)) % (10**8)
                         if str(expected_index) in str(lighter_order_id):
                             client_order_id = client_id
-                            print(f"[INFO] Matched trade {trade_id} to order {client_order_id} via index matching")
+                            logger.info(f"Matched trade {trade_id} to order {client_order_id} via index matching")
                             break
             else:
-                print(f"[WARNING] No tx_hash in trade data")
+                logger.warning("No tx_hash in trade data")
                 
             if not client_order_id:
-                print(f"[WARNING] Could not match trade {trade_id} to any known order")
+                logger.warning(f"Could not match trade {trade_id} to any known order")
                 return
                 
             order = self.orders.get(client_order_id)
             if not order:
-                print(f"[WARNING] Order {client_order_id} not found in orders dict")
+                logger.warning(f"Order {client_order_id} not found in orders dict")
                 return
                 
-            print(f"[INFO] Matched trade {trade_id} to order {client_order_id}")
+            logger.info(f"Matched trade {trade_id} to order {client_order_id}")
             
             # Extract fill details from Lighter trade format
             market_id = trade_data.get("market_id")
@@ -777,16 +861,16 @@ class LighterCpty(AsyncCpty):
             
             # Mark fill as processed
             self._processed_fills.add(trade_id)
-            print(f"[INFO] Processed fill: {trade_id} for order {client_order_id}, qty={quantity}, total_filled={self._order_filled_quantities[client_order_id]}")
+            logger.info(f"Processed fill: {trade_id} for order {client_order_id}, qty={quantity}, total_filled={self._order_filled_quantities[client_order_id]}")
             
             # Check if order is fully filled
             filled_qty = self._calculate_filled_quantity(client_order_id)
             if filled_qty >= order.quantity:
                 self.out_order(client_order_id, canceled=False)
-                print(f"[INFO] Order fully filled: {client_order_id}")
+                logger.info(f"Order fully filled: {client_order_id}")
                 
         except Exception as e:
-            print(f"[ERROR] Error processing single fill: {e}")
+            logger.error(f"Error processing single fill: {e}")
             import traceback
             traceback.print_exc()
     
@@ -816,10 +900,10 @@ class LighterCpty(AsyncCpty):
             if order_id in self._order_filled_quantities:
                 del self._order_filled_quantities[order_id]
             
-            print(f"[INFO] Order cancelled: {order_id}")
+            logger.info(f"Order cancelled: {order_id}")
             
         except Exception as e:
-            print(f"[ERROR] Error finalizing cancel: {e}")
+            logger.error(f"Error finalizing cancel: {e}")
     
     async def _fetch_and_process_recent_trades(self):
         """Fetch recent trades from API when trade count changes."""
@@ -827,7 +911,7 @@ class LighterCpty(AsyncCpty):
             if not self.api_client or not self.signer_client:
                 return
                 
-            print("[INFO] Fetching recent trades from API...")
+            logger.info("Fetching recent trades from API...")
             
             # For now, just log that we need to implement this
             # In a real implementation, we would:
@@ -835,7 +919,7 @@ class LighterCpty(AsyncCpty):
             # 2. Match them to our orders
             # 3. Report fills via fill_order()
             
-            print("[INFO] TODO: Implement trade fetching from Lighter API")
+            logger.info("TODO: Implement trade fetching from Lighter API")
             
             # As a workaround, check if any orders are no longer open
             # This indicates they were filled
@@ -843,15 +927,20 @@ class LighterCpty(AsyncCpty):
                 if order.status == OrderStatus.Pending:
                     # Check if this order still exists
                     # If not, it was likely filled
-                    print(f"[INFO] Checking status of order {order_id}")
+                    logger.info(f"Checking status of order {order_id}")
                     
         except Exception as e:
-            print(f"[ERROR] Error fetching recent trades: {e}")
+            logger.error(f"Error fetching recent trades: {e}")
             import traceback
             traceback.print_exc()
     
     async def _periodic_account_updates(self):
-        """Send periodic account updates."""
+        """Send periodic account updates.
+        
+        DISABLED: This function was causing 429 rate limit errors.
+        WebSocket provides real-time account updates, making polling unnecessary.
+        Only enable this as a fallback if WebSocket updates are unreliable.
+        """
         while self.logged_in:
             try:
                 await asyncio.sleep(30)  # Every 30 seconds
@@ -864,7 +953,7 @@ class LighterCpty(AsyncCpty):
                         await self._broadcast_account_update()
                 
             except Exception as e:
-                print(f"[ERROR] Error in periodic updates: {e}")
+                logger.error(f"Error in periodic updates: {e}")
     
     def _process_order_update(self, exchange_order_id: str, order_data: Dict):
         """Process order update that may contain fill information."""
@@ -914,29 +1003,65 @@ class LighterCpty(AsyncCpty):
                     self._order_filled_quantities[client_order_id] = filled_qty
                     self._processed_fills.add(fill_id)
                     
-                    print(f"[INFO] Order update fill: {client_order_id} filled {new_fill_qty}, total {filled_qty}")
+                    logger.info(f"Order update fill: {client_order_id} filled {new_fill_qty}, total {filled_qty}")
                     
             # Check if order is fully filled or cancelled
             if status in ["filled", "complete", "done"]:
                 if filled_qty >= order.quantity:
                     self.out_order(client_order_id, canceled=False)
-                    print(f"[INFO] Order complete: {client_order_id}")
+                    logger.info(f"Order complete: {client_order_id}")
             elif status in ["cancelled", "canceled", "rejected"]:
                 self.out_order(client_order_id, canceled=True)
-                print(f"[INFO] Order cancelled: {client_order_id}")
+                logger.info(f"Order cancelled: {client_order_id}")
                 
         except Exception as e:
-            print(f"[ERROR] Error processing order update: {e}")
+            logger.error(f"Error processing order update: {e}")
             import traceback
             traceback.print_exc()
 
 
 async def main():
     """Run the Lighter CPTY server."""
-    logging.basicConfig(level=logging.INFO)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Lighter CPTY Server")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=50051,
+        help="Port to listen on (default: 50051)"
+    )
+    args = parser.parse_args()
     
+    # Configure logging
+    numeric_level = getattr(logging, args.log_level.upper())
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=numeric_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True  # Force reconfiguration
+    )
+    
+    # Disable propagation for specific noisy loggers
+    logging.getLogger('architect_py').setLevel(numeric_level)
+    logging.getLogger('websockets').setLevel(numeric_level)
+    logging.getLogger('asyncio').setLevel(numeric_level)
+    logging.getLogger('grpc').setLevel(numeric_level)
+    
+    # Set level for all existing loggers
+    for name in logging.root.manager.loggerDict:
+        logger = logging.getLogger(name)
+        logger.setLevel(numeric_level)
+    
+    # Run the server
     cpty = LighterCpty()
-    await cpty.serve("[::]:50051")
+    await cpty.serve(f"[::]:{args.port}")
 
 
 if __name__ == "__main__":

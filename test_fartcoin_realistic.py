@@ -40,7 +40,7 @@ async def main():
     
     # Order parameters - using a more realistic price
     order_id = f"fart-{uuid.uuid4().hex[:8]}"
-    limit_price = Decimal("1.055")  # More realistic price for FARTCOIN
+    limit_price = Decimal("1.255")  # More realistic price for FARTCOIN
     amount = Decimal("20")
     
     print(f"\n=== Placing Order ===")
@@ -68,7 +68,8 @@ async def main():
         
         print(f"\n✓ Order placed successfully!")
         print(f"Architect Order ID: {place_order_result.id}")
-        print(f"Status: {place_order_result.status}")
+        status = await architect_client.get_order(place_order_result.id)
+        print(f"Status: {status}")
         
         # Wait for order to process
         await asyncio.sleep(5)
