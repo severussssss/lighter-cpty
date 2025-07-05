@@ -248,7 +248,8 @@ class LighterCpty(AsyncCpty):
             
             # Set up callbacks
             self.ws_client.on_account = self._on_account_update
-            self.ws_client.on_trade = self._on_trade_update
+            # Don't subscribe to market-wide trades - we only need our fills from account updates
+            # self.ws_client.on_trade = self._on_trade_update
             self.ws_client.on_connected = self._on_ws_connected
             self.ws_client.on_disconnected = self._on_ws_disconnected
             self.ws_client.on_error = self._on_ws_error
@@ -339,8 +340,12 @@ class LighterCpty(AsyncCpty):
             trades = account.get("trades", {})
             if trades:
                 logger.info(f"Trades in account update: {trades}")
+                # Process these trades directly
+                self._process_order_fills(account)
             else:
                 logger.debug(f"Empty trades field in account update")
+                # Log what fields are present
+                logger.debug(f"Account update fields: {list(account.keys())}")
             
             # Check if trade counts changed
             new_total_trades = account.get("total_trades_count", 0)
