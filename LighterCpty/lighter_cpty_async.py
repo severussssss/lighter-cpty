@@ -1,6 +1,7 @@
 """Lighter CPTY implementation using architect-py's AsyncCpty base class."""
 import asyncio
 import argparse
+import json
 import logging
 import os
 import sys
@@ -521,15 +522,22 @@ class LighterCpty(AsyncCpty):
             
             # Track order
             tx_hash_str = str(tx_hash.tx_hash) if hasattr(tx_hash, 'tx_hash') else str(tx_hash)
+            client_order_index = abs(hash(order.id)) % (10**8)
+            
+            # Store mappings for both tx_hash and order index
             self.orders[order.id] = order
             self.client_to_exchange_id[order.id] = tx_hash_str
             self.exchange_to_client_id[tx_hash_str] = order.id
+            
+            # Also store mapping by order index for WebSocket matching
+            order_index_key = f"order_index_{client_order_index}"
+            self.exchange_to_client_id[order_index_key] = order.id
             
             # Acknowledge order
             logger.info(f"About to acknowledge order: {order.id}")
             self.ack_order(order.id, exchange_order_id=tx_hash_str)
             logger.info(f"Order acknowledged: {order.id} -> {tx_hash_str}")
-            logger.info(f"Order placed: {order.id} -> {tx_hash_str}")
+            logger.info(f"Order placed: {order.id} -> {tx_hash_str}, client_order_index: {client_order_index}")
             
             # Debug: Check orderflow subscriptions
             logger.info(f"Active orderflow subscriptions: {len(self.orderflow_subscriptions)}")
@@ -783,28 +791,35 @@ class LighterCpty(AsyncCpty):
             # Get the order ID (it's the ask_id or bid_id depending on our side)
             lighter_order_id = trade_data.get("ask_id") if is_our_ask else trade_data.get("bid_id")
             
-            # Find the client order ID using tx_hash
+            # Find the client order ID using tx_hash or order index
             tx_hash = trade_data.get("tx_hash")
             client_order_id = None
+            
+            # Log the trade data for debugging
+            logger.info(f"Trade data: ask_id={trade_data.get('ask_id')}, bid_id={trade_data.get('bid_id')}, tx_hash={tx_hash}")
             
             if tx_hash:
                 client_order_id = self.exchange_to_client_id.get(tx_hash)
                 if client_order_id:
                     logger.info(f"Matched trade {trade_id} to order {client_order_id} via tx_hash")
-                else:
-                    logger.warning(f"tx_hash {tx_hash} not found in exchange_to_client_id mapping")
-                    # Fall back to old matching logic
-                    for client_id, order in self.orders.items():
-                        expected_index = abs(hash(client_id)) % (10**8)
-                        if str(expected_index) in str(lighter_order_id):
-                            client_order_id = client_id
-                            logger.info(f"Matched trade {trade_id} to order {client_order_id} via index matching")
-                            break
-            else:
-                logger.warning("No tx_hash in trade data")
-                
+            
+            # If not found by tx_hash, try matching by order index
+            if not client_order_id and lighter_order_id:
+                # Try to extract order index from the lighter_order_id
+                for client_id, order in self.orders.items():
+                    expected_index = abs(hash(client_id)) % (10**8)
+                    order_index_key = f"order_index_{expected_index}"
+                    
+                    # Check if this order index matches
+                    if (str(expected_index) in str(lighter_order_id) or 
+                        self.exchange_to_client_id.get(order_index_key) == client_id):
+                        client_order_id = client_id
+                        logger.info(f"Matched trade {trade_id} to order {client_order_id} via order index {expected_index}")
+                        break
+            
             if not client_order_id:
-                logger.warning(f"Could not match trade {trade_id} to any known order")
+                logger.warning(f"Could not match trade {trade_id} to any known order (tx_hash={tx_hash}, lighter_order_id={lighter_order_id})")
+                logger.warning(f"Known exchange_to_client_id mappings: {list(self.exchange_to_client_id.keys())[:5]}...")  # Show first 5
                 return
                 
             order = self.orders.get(client_order_id)
