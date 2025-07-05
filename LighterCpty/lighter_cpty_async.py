@@ -339,9 +339,13 @@ class LighterCpty(AsyncCpty):
             # Log trades field for debugging
             trades = account.get("trades", {})
             if trades:
-                logger.info(f"Trades in account update: {trades}")
-                # Process these trades directly
-                self._process_order_fills(account)
+                logger.info(f"Trades in account update: {len(trades)} markets with trades")
+                # Only process trades if we have active orders
+                if self.orders:
+                    logger.info(f"Processing trades for {len(self.orders)} active orders")
+                    self._process_order_fills(account)
+                else:
+                    logger.debug(f"Skipping trade processing - no active orders")
             else:
                 logger.debug(f"Empty trades field in account update")
                 # Log what fields are present
@@ -782,6 +786,11 @@ class LighterCpty(AsyncCpty):
             # Check if we've already processed this fill
             if trade_id in self._processed_fills:
                 return
+            
+            # Skip if we have no orders to match against
+            if not self.orders:
+                logger.debug(f"Skipping trade {trade_id} - no active orders to match")
+                return
                 
             logger.info(f"Processing new trade {trade_id}")
             
@@ -823,8 +832,9 @@ class LighterCpty(AsyncCpty):
                         break
             
             if not client_order_id:
-                logger.warning(f"Could not match trade {trade_id} to any known order (tx_hash={tx_hash}, lighter_order_id={lighter_order_id})")
-                logger.warning(f"Known exchange_to_client_id mappings: {list(self.exchange_to_client_id.keys())[:5]}...")  # Show first 5
+                # This is likely a historical trade or a trade that happened before we started tracking
+                logger.debug(f"Could not match trade {trade_id} to any known order (tx_hash={tx_hash}, lighter_order_id={lighter_order_id})")
+                logger.debug(f"Known exchange_to_client_id mappings: {list(self.exchange_to_client_id.keys())[:5]}...")  # Show first 5
                 return
                 
             order = self.orders.get(client_order_id)
