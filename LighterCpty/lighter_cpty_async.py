@@ -86,39 +86,39 @@ class LighterCpty(AsyncCpty):
     
     def _put_orderflow_event(self, event):
         """Override to add logging for debugging."""
-        logger.info(f"Putting orderflow event: {type(event).__name__} - {event}")
-        logger.info(f"Number of orderflow subscriptions: {len(self.orderflow_subscriptions)}")
+        logger.debug(f"Putting orderflow event: {type(event).__name__} - {event}")
+        logger.debug(f"Number of orderflow subscriptions: {len(self.orderflow_subscriptions)}")
         
         if len(self.orderflow_subscriptions) == 0:
             logger.warning("No orderflow subscriptions active! Architect Core may not be connected.")
         else:
             # Log details about each subscription and queue
             for sub_id, sub in self.orderflow_subscriptions.items():
-                logger.info(f"  Subscription #{sub_id}: Queue size = {sub.queue.qsize()}")
+                logger.debug(f"  Subscription #{sub_id}: Queue size = {sub.queue.qsize()}")
                 
                 # Log the event details based on type
                 if hasattr(event, '__dict__'):
-                    logger.info(f"  Event details: {vars(event)}")
+                    logger.debug(f"  Event details: {vars(event)}")
                 
                 # For reject events, log specific fields
                 if type(event).__name__ == 'TaggedOrderReject':
-                    logger.info(f"  → Order ID: {event.id}")
-                    logger.info(f"  → Reject reason: {event.reject_reason}")
-                    logger.info(f"  → Reject message: {event.message}")
+                    logger.debug(f"  → Order ID: {event.id}")
+                    logger.debug(f"  → Reject reason: {event.reject_reason}")
+                    logger.debug(f"  → Reject message: {event.message}")
                 elif type(event).__name__ == 'TaggedOrderAck':
-                    logger.info(f"  → Order ID: {event.order_id}")
-                    logger.info(f"  → Exchange order ID: {event.exchange_order_id}")
+                    logger.debug(f"  → Order ID: {event.order_id}")
+                    logger.debug(f"  → Exchange order ID: {event.exchange_order_id}")
                 elif type(event).__name__ == 'TaggedFill':
-                    logger.info(f"  → Order ID: {event.order_id}")
-                    logger.info(f"  → Fill quantity: {event.quantity}")
-                    logger.info(f"  → Fill price: {event.price}")
+                    logger.debug(f"  → Order ID: {event.order_id}")
+                    logger.debug(f"  → Fill quantity: {event.quantity}")
+                    logger.debug(f"  → Fill price: {event.price}")
         
         # Call parent method to actually put the event
         super()._put_orderflow_event(event)
         
         # After putting the event, check if it's actually in the queue
         for sub_id, sub in self.orderflow_subscriptions.items():
-            logger.info(f"  After put: Subscription #{sub_id} queue size = {sub.queue.qsize()}")
+            logger.debug(f"  After put: Subscription #{sub_id} queue size = {sub.queue.qsize()}")
     
     async def SubscribeOrderflow(self, request, context):
         """Override to add logging when Architect Core subscribes."""
@@ -148,9 +148,9 @@ class LighterCpty(AsyncCpty):
         while True:
             next_item = await subscription.queue.get()
             event_count += 1
-            logger.info(f"=== YIELDING ORDERFLOW EVENT #{event_count} ===")
-            logger.info(f"  Event type: {type(next_item).__name__}")
-            logger.info(f"  Event content: {next_item}")
+            logger.debug(f"=== YIELDING ORDERFLOW EVENT #{event_count} ===")
+            logger.debug(f"  Event type: {type(next_item).__name__}")
+            logger.debug(f"  Event content: {next_item}")
             yield next_item
     
     def _load_config_from_env(self) -> Dict:
