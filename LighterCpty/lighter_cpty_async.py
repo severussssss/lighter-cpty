@@ -194,12 +194,8 @@ class LighterCpty(AsyncCpty):
                 initial_margin=None,
                 maintenance_margin=None,
             )
-            
-            # Initialize the venue dict if needed
-            if self.execution_venue not in self.execution_info:
-                self.execution_info[self.execution_venue] = {}
-            
-            self.execution_info[self.execution_venue][architect_symbol] = exec_info
+
+            self.add_execution_info(architect_symbol, exec_info)
     
     async def _init_clients(self) -> bool:
         """Initialize Lighter SDK clients."""
@@ -464,7 +460,7 @@ class LighterCpty(AsyncCpty):
         
         self.logged_in = True
         logger.info(f"Login successful for user {self.user_id}")
-        
+
         # Start periodic updates
         # DISABLED: Causing 429 rate limit errors - WebSocket updates are sufficient
         # asyncio.create_task(self._periodic_account_updates())
@@ -519,7 +515,7 @@ class LighterCpty(AsyncCpty):
                 reduce_only=0,
                 trigger_price=0
             )
-            
+
             if err is not None:
                 logger.error(f"Failed to place order: {err}")
                 self.reject_order(
