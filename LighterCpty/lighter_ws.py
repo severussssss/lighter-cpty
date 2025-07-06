@@ -214,6 +214,7 @@ class LighterWebSocketClient:
     
     async def _handle_message(self, data: Dict[str, Any]) -> None:
         """Handle incoming WebSocket message."""
+
         msg_type = data.get("type")
         
         if msg_type == "connected":
@@ -366,6 +367,17 @@ class LighterWebSocketClient:
             subscription = {
                 "type": "subscribe",
                 "channel": channel
+            }
+            await self.pending_subscriptions.put(subscription)
+            self.subscriptions.add(channel)
+
+    async def subscribe_executed_transactions(self) -> None:
+        """Subscribe to transactions."""
+        channel = "executed_transaction"
+        if channel not in self.subscriptions:
+            subscription = {
+                "type": "subscribe",
+                "channel": channel 
             }
             await self.pending_subscriptions.put(subscription)
             self.subscriptions.add(channel)

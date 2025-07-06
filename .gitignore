@@ -39,3 +39,6 @@ dist/
 *.json
 \!examples/*.json
 EOF < /dev/null
+
+# Scratch directory 
+var/
