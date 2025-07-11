@@ -10,11 +10,13 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Set
 from dotenv import load_dotenv
 
 # Suppress debug logs from architect_py by default
 logging.getLogger('architect_py').setLevel(logging.INFO)
+# Temporarily enable debug for our module
+logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 # Architect imports
 from architect_py import (
@@ -29,7 +31,7 @@ from architect_py import (
     ExecutionInfo,
     AccountPosition,
 )
-from architect_py.async_cpty import AsyncCpty
+from architect_py.async_cpty import AsyncCpty, PlaceBatchOrder
 import grpc
 
 # Lighter SDK imports
@@ -40,6 +42,8 @@ from lighter.exceptions import ApiException
 # Local imports
 from .lighter_ws import LighterWebSocketClient
 from .balance_fetcher import LighterBalanceFetcher
+from .orderbook_manager import OrderBook
+from .market_loader import load_market_info
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,11 @@ class LighterCpty(AsyncCpty):
         self.ws_connected = False
         self.latest_account_data: Optional[Dict] = None
         self.latest_balance: Optional[Decimal] = None
+        
+        # OrderBook tracking for L2 book streaming
+        self.orderbooks: Dict[int, OrderBook] = {}
+        # Subscribe to active mainnet markets
+        self.subscribed_orderbook_markets: Set[int] = {20, 21, 24}  # BERA, FARTCOIN, HYPE
         
         # Initialize execution info
         self._init_execution_info()
@@ -172,9 +181,19 @@ class LighterCpty(AsyncCpty):
         """Initialize execution info for known markets."""
         # Default markets
         default_markets = [
+            (0, "BTC", "USDC"),
+            (1, "ETH", "USDC"),
+            (2, "SOL", "USDC"),
+            (3, "ARB", "USDC"),
+            (4, "OP", "USDC"),
+            (5, "MATIC", "USDC"),
+            (6, "AVAX", "USDC"),
+            (7, "LINK", "USDC"),
+            (8, "APT", "USDC"),
+            (9, "NEAR", "USDC"),
+            (20, "BERA", "USDC"),
             (21, "FARTCOIN", "USDC"),
             (24, "HYPE", "USDC"),
-            (20, "BERA", "USDC"),
         ]
         
         for market_id, base, quote in default_markets:
@@ -227,6 +246,38 @@ class LighterCpty(AsyncCpty):
             
             logger.info("Lighter SDK clients initialized successfully")
             
+            # Load market info for proper symbol names
+            try:
+                market_info = load_market_info()
+                for market_id, info in market_info.items():
+                    base = info.get('base_asset', 'UNKNOWN')
+                    quote = info.get('quote_asset', 'USDC')
+                    architect_symbol = f"{base}-{quote} LIGHTER Perpetual/{quote} Crypto"
+                    self.symbol_to_market_id[architect_symbol] = market_id
+                    self.market_id_to_symbol[market_id] = architect_symbol
+                    
+                    # Update execution info if not already set
+                    if architect_symbol not in self.execution_info.get(self.execution_venue, {}):
+                        exec_info = ExecutionInfo(
+                            execution_venue="LIGHTER",
+                            exchange_symbol=f"{base}-{quote}",
+                            tick_size={"simple": "0.00001"},
+                            step_size="0.1",
+                            min_order_quantity="0.1",
+                            min_order_quantity_unit={"unit": "base"},
+                            is_delisted=False,
+                            initial_margin=None,
+                            maintenance_margin=None,
+                        )
+                        if self.execution_venue not in self.execution_info:
+                            self.execution_info[self.execution_venue] = {}
+                        self.execution_info[self.execution_venue][architect_symbol] = exec_info
+                            
+                logger.info(f"Loaded market info for {len(market_info)} markets")
+            except Exception as e:
+                logger.warning(f"Failed to load market info: {e}")
+                # Continue with default market names
+            
             # Initialize WebSocket
             await self._init_websocket()
             
@@ -250,6 +301,15 @@ class LighterCpty(AsyncCpty):
             self.ws_client.on_account = self._on_account_update
             # Don't subscribe to market-wide trades - we only need our fills from account updates
             # self.ws_client.on_trade = self._on_trade_update
+            
+            # Create a wrapper to intercept the raw message
+            def orderbook_wrapper(market_id: int, orderbook_data: Dict):
+                # First message should be a snapshot, subsequent ones are updates
+                if market_id not in self.orderbooks:
+                    logger.debug(f"First message for market {market_id} - treating as snapshot")
+                self._on_order_book_update(market_id, orderbook_data)
+            
+            self.ws_client.on_order_book = orderbook_wrapper
             self.ws_client.on_connected = self._on_ws_connected
             self.ws_client.on_disconnected = self._on_ws_disconnected
             self.ws_client.on_error = self._on_ws_error
@@ -274,10 +334,17 @@ class LighterCpty(AsyncCpty):
                     break
                 await asyncio.sleep(0.5)
             
-            if self.ws_connected and self.ws_client and self.account_index:
+            if self.ws_connected and self.ws_client:
                 # Subscribe to account updates
-                await self.ws_client.subscribe_account(self.account_index)
-                logger.info(f"Subscribed to account_all/{self.account_index}")
+                if self.account_index:
+                    await self.ws_client.subscribe_account(self.account_index)
+                    logger.info(f"Subscribed to account_all/{self.account_index}")
+                
+                # Subscribe to orderbook updates for configured markets
+                for market_id in self.subscribed_orderbook_markets:
+                    await self.ws_client.subscribe_order_book(market_id)
+                    await asyncio.sleep(0.05)  # Small delay to avoid overwhelming the server
+                logger.info(f"Subscribed to orderbooks for {len(self.subscribed_orderbook_markets)} markets")
                 
         except Exception as e:
             logger.error(f"Failed to set up subscriptions: {e}")
@@ -392,6 +459,80 @@ class LighterCpty(AsyncCpty):
             
         except Exception as e:
             logger.error(f"Error processing account update: {e}")
+    
+    def _on_order_book_update(self, market_id: int, orderbook_data: Dict):
+        """Handle orderbook updates from WebSocket."""
+        try:
+            # Skip if not in our subscribed markets
+            if market_id not in self.subscribed_orderbook_markets:
+                return
+            
+            # Initialize orderbook if needed
+            if market_id not in self.orderbooks:
+                self.orderbooks[market_id] = OrderBook(market_id)
+                logger.info(f"Created orderbook for market {market_id}")
+            
+            # Log the data structure to understand what we're receiving
+            logger.debug(f"Market {market_id} orderbook data keys: {list(orderbook_data.keys())}")
+            if 'bids' in orderbook_data:
+                logger.debug(f"Market {market_id} bids count: {len(orderbook_data.get('bids', []))}")
+            if 'asks' in orderbook_data:
+                logger.debug(f"Market {market_id} asks count: {len(orderbook_data.get('asks', []))}")
+            
+            # The OrderBook class handles the logic of snapshot vs update
+            # It checks if it's initialized and treats first update as snapshot if not
+            self.orderbooks[market_id].apply_update(orderbook_data)
+            
+            # Get top levels for streaming
+            top_bids, top_asks = self.orderbooks[market_id].get_top_levels(10)
+            
+            # Log orderbook state for debugging
+            if market_id == 0 or market_id == 1:  # Log details for first two markets
+                logger.debug(f"Market {market_id}: {len(top_bids)} bids, {len(top_asks)} asks")
+                if top_bids:
+                    logger.debug(f"  Best bid: {top_bids[0]}")
+                if top_asks:
+                    logger.debug(f"  Best ask: {top_asks[0]}")
+            
+            # Skip completely empty orderbooks
+            if not top_bids and not top_asks:
+                logger.debug(f"Skipping market {market_id} - completely empty orderbook")
+                return
+            
+            # Convert to Decimal format for AsyncCpty
+            bids = [[Decimal(str(price)), Decimal(str(size))] for price, size in top_bids] if top_bids else []
+            asks = [[Decimal(str(price)), Decimal(str(size))] for price, size in top_asks] if top_asks else []
+            
+            # Get symbol for this market
+            symbol = self.market_id_to_symbol.get(market_id)
+            if not symbol:
+                # Generate a default symbol if not in our mapping
+                symbol = f"MARKET_{market_id} LIGHTER Perpetual/USDC Crypto"
+            
+            # Store the latest snapshot for streaming
+            timestamp = datetime.now()
+            
+            # Call the base class method to stream L2 updates via gRPC
+            self.on_l2_book_snapshot(
+                symbol=symbol,
+                timestamp=timestamp,
+                bids=bids if bids else None,
+                asks=asks if asks else None
+            )
+            
+            # Also update L1 book with best bid/ask
+            best_bid = bids[0] if bids else None
+            best_ask = asks[0] if asks else None
+            
+            self.on_l1_book_snapshot(
+                symbol=symbol,
+                timestamp=timestamp,
+                best_bid=best_bid,
+                best_ask=best_ask
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing orderbook update for market {market_id}: {e}", exc_info=True)
     
     async def _broadcast_account_update(self):
         """Broadcast account update to all connections."""
@@ -561,6 +702,98 @@ class LighterCpty(AsyncCpty):
                 reject_message=str(e)
             )
     
+    async def on_place_batch_order(self, batch: PlaceBatchOrder):
+        """Handle batch order placement request."""
+        logger.info(f"Place batch order: {len(batch.orders)} orders")
+        
+        if not self.logged_in or not self.signer_client:
+            # Reject all orders in the batch
+            for order in batch.orders:
+                self.reject_order(
+                    order.id,
+                    reject_reason=OrderRejectReason.NotLoggedIn,
+                    reject_message="Not logged in or client not initialized"
+                )
+            return
+        
+        # Process each order in the batch
+        # Note: For Lighter, these are processed individually, not atomically
+        successful_orders = []
+        failed_orders = []
+        
+        for order in batch.orders:
+            try:
+                # Validate the order first
+                market_id = self.symbol_to_market_id.get(order.symbol)
+                if market_id is None:
+                    self.reject_order(
+                        order.id,
+                        reject_reason=OrderRejectReason.UnknownSymbol,
+                        reject_message=f"Unknown symbol: {order.symbol}"
+                    )
+                    failed_orders.append(order.id)
+                    continue
+                
+                # Convert price and quantity based on market
+                if market_id == 21:  # FARTCOIN
+                    price_int = int(float(order.limit_price) * 100000) if order.limit_price else 0  # 5 decimals
+                    base_amount = int(float(order.quantity) * 10)  # 1 decimal
+                else:
+                    price_int = int(float(order.limit_price) * 100) if order.limit_price else 0
+                    base_amount = int(float(order.quantity) * 1e6)
+                
+                # Place order on Lighter
+                tx, tx_hash, err = await self.signer_client.create_order(
+                    market_index=market_id,
+                    client_order_index=abs(hash(order.id)) % (10**8),
+                    base_amount=base_amount,
+                    price=price_int,
+                    is_ask=order.dir == OrderDir.SELL,
+                    order_type=SignerClient.ORDER_TYPE_LIMIT,
+                    time_in_force=SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+                    reduce_only=0,
+                    trigger_price=0
+                )
+                
+                if err is not None:
+                    logger.error(f"Failed to place order {order.id}: {err}")
+                    self.reject_order(
+                        order.id,
+                        reject_reason=OrderRejectReason.ExchangeReject,
+                        reject_message=str(err)
+                    )
+                    failed_orders.append(order.id)
+                    continue
+                
+                # Track order
+                tx_hash_str = str(tx_hash.tx_hash) if hasattr(tx_hash, 'tx_hash') else str(tx_hash)
+                client_order_index = abs(hash(order.id)) % (10**8)
+                
+                # Store mappings
+                self.orders[order.id] = order
+                self.client_to_exchange_id[order.id] = tx_hash_str
+                self.exchange_to_client_id[tx_hash_str] = order.id
+                
+                # Also store mapping by order index for WebSocket matching
+                order_index_key = f"order_index_{client_order_index}"
+                self.exchange_to_client_id[order_index_key] = order.id
+                
+                # Acknowledge order
+                self.ack_order(order.id, exchange_order_id=tx_hash_str)
+                successful_orders.append(order.id)
+                logger.info(f"Batch order placed: {order.id} -> {tx_hash_str}")
+                
+            except Exception as e:
+                logger.error(f"Error placing batch order {order.id}: {e}")
+                self.reject_order(
+                    order.id,
+                    reject_reason=OrderRejectReason.InvalidOrder,
+                    reject_message=str(e)
+                )
+                failed_orders.append(order.id)
+        
+        logger.info(f"Batch order complete: {len(successful_orders)} successful, {len(failed_orders)} failed")
+    
     async def on_cancel_order(self, cancel: Cancel, original_order: Optional[Order] = None):
         """Handle cancel order request."""
         logger.info(f"Cancel order: {cancel.xid}")  # xid is the cancel_id field
@@ -713,6 +946,7 @@ class LighterCpty(AsyncCpty):
             if order.status in [OrderStatus.Pending, OrderStatus.Open]:
                 open_orders.append(order)
         return open_orders
+    
     
     def _process_order_fills(self, account_data: Dict):
         """Process order fills from account WebSocket data."""
