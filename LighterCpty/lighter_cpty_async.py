@@ -36,14 +36,22 @@ import grpc
 
 # Lighter SDK imports
 import lighter
-from lighter import SignerClient, ApiClient, Configuration
+from lighter import SignerClient, ApiClient, Configuration, TransactionApi
 from lighter.exceptions import ApiException
 
 # Local imports
-from .lighter_ws import LighterWebSocketClient
-from .balance_fetcher import LighterBalanceFetcher
-from .orderbook_manager import OrderBook
-from .market_loader import load_market_info
+try:
+    # For when running as a module
+    from .lighter_ws import LighterWebSocketClient
+    from .balance_fetcher import LighterBalanceFetcher
+    from .orderbook_manager import OrderBook
+    from .market_loader import load_market_info
+except ImportError:
+    # For when running directly
+    from lighter_ws import LighterWebSocketClient
+    from balance_fetcher import LighterBalanceFetcher
+    from orderbook_manager import OrderBook
+    from market_loader import load_market_info
 
 logger = logging.getLogger(__name__)
 
@@ -624,7 +632,7 @@ class LighterCpty(AsyncCpty):
         if not self.logged_in or not self.signer_client:
             self.reject_order(
                 order.id,
-                reject_reason=OrderRejectReason.NotLoggedIn,
+                reject_reason=OrderRejectReason.NotAuthorized,
                 reject_message="Not logged in or client not initialized"
             )
             return
@@ -635,7 +643,7 @@ class LighterCpty(AsyncCpty):
             if market_id is None:
                 self.reject_order(
                     order.id,
-                    reject_reason=OrderRejectReason.UnknownSymbol,
+                    reject_reason=OrderRejectReason.InvalidOrder,
                     reject_message=f"Unknown symbol: {order.symbol}"
                 )
                 return
@@ -665,7 +673,7 @@ class LighterCpty(AsyncCpty):
                 logger.error(f"Failed to place order: {err}")
                 self.reject_order(
                     order.id,
-                    reject_reason=OrderRejectReason.ExchangeReject,
+                    reject_reason=OrderRejectReason.Unknown,
                     reject_message=str(err)
                 )
                 return
@@ -703,7 +711,7 @@ class LighterCpty(AsyncCpty):
             )
     
     async def on_place_batch_order(self, batch: PlaceBatchOrder):
-        """Handle batch order placement request."""
+        """Handle batch order placement request using Lighter's native batch functionality."""
         logger.info(f"Place batch order: {len(batch.orders)} orders")
         
         if not self.logged_in or not self.signer_client:
@@ -711,15 +719,41 @@ class LighterCpty(AsyncCpty):
             for order in batch.orders:
                 self.reject_order(
                     order.id,
-                    reject_reason=OrderRejectReason.NotLoggedIn,
+                    reject_reason=OrderRejectReason.NotAuthorized,
                     reject_message="Not logged in or client not initialized"
                 )
             return
         
-        # Process each order in the batch
-        # Note: For Lighter, these are processed individually, not atomically
-        successful_orders = []
-        failed_orders = []
+        # Get the starting nonce for the batch
+        try:
+            # Create API client to get nonce
+            config = Configuration(
+                host=os.getenv("LIGHTER_API_URL", "https://mainnet.zklighter.elliot.ai"),
+                api_key={"ApiKeyAuth": os.getenv("LIGHTER_API_KEY")}
+            )
+            async with ApiClient(config) as api_client:
+                tx_api = TransactionApi(api_client)
+                next_nonce_response = await tx_api.next_nonce(
+                    account_index=self.account_index,
+                    api_key_index=self.config["api_key_index"]
+                )
+                current_nonce = next_nonce_response.nonce
+                logger.info(f"Starting batch with nonce: {current_nonce}")
+        except Exception as e:
+            logger.error(f"Failed to get nonce: {e}")
+            # Reject all orders
+            for order in batch.orders:
+                self.reject_order(
+                    order.id,
+                    reject_reason=OrderRejectReason.Unknown,
+                    reject_message=f"Failed to get nonce: {str(e)}"
+                )
+            return
+        
+        # Prepare batch transaction data
+        tx_types = []
+        tx_infos = []
+        order_mappings = []  # Keep track of order details for later
         
         for order in batch.orders:
             try:
@@ -728,10 +762,9 @@ class LighterCpty(AsyncCpty):
                 if market_id is None:
                     self.reject_order(
                         order.id,
-                        reject_reason=OrderRejectReason.UnknownSymbol,
+                        reject_reason=OrderRejectReason.InvalidOrder,
                         reject_message=f"Unknown symbol: {order.symbol}"
                     )
-                    failed_orders.append(order.id)
                     continue
                 
                 # Convert price and quantity based on market
@@ -742,57 +775,109 @@ class LighterCpty(AsyncCpty):
                     price_int = int(float(order.limit_price) * 100) if order.limit_price else 0
                     base_amount = int(float(order.quantity) * 1e6)
                 
-                # Place order on Lighter
-                tx, tx_hash, err = await self.signer_client.create_order(
+                # Sign the order (creates tx_info)
+                tx_info, error = self.signer_client.sign_create_order(
                     market_index=market_id,
                     client_order_index=abs(hash(order.id)) % (10**8),
                     base_amount=base_amount,
                     price=price_int,
-                    is_ask=order.dir == OrderDir.SELL,
+                    is_ask=int(order.dir == OrderDir.SELL),
                     order_type=SignerClient.ORDER_TYPE_LIMIT,
                     time_in_force=SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
                     reduce_only=0,
-                    trigger_price=0
+                    trigger_price=0,
+                    nonce=current_nonce
                 )
+                current_nonce += 1  # Increment nonce for next order
                 
-                if err is not None:
-                    logger.error(f"Failed to place order {order.id}: {err}")
+                if error is not None:
+                    logger.error(f"Failed to sign order {order.id}: {error}")
                     self.reject_order(
                         order.id,
-                        reject_reason=OrderRejectReason.ExchangeReject,
-                        reject_message=str(err)
+                        reject_reason=OrderRejectReason.InvalidOrder,
+                        reject_message=str(error)
                     )
-                    failed_orders.append(order.id)
                     continue
                 
-                # Track order
-                tx_hash_str = str(tx_hash.tx_hash) if hasattr(tx_hash, 'tx_hash') else str(tx_hash)
-                client_order_index = abs(hash(order.id)) % (10**8)
+                # Add to batch
+                tx_types.append(str(SignerClient.TX_TYPE_CREATE_ORDER))
+                tx_infos.append(tx_info)
+                logger.debug(f"Added to batch - tx_type: {SignerClient.TX_TYPE_CREATE_ORDER}, tx_info: {tx_info}")
                 
-                # Store mappings
+                # Track order details
+                order_mappings.append({
+                    'order': order,
+                    'client_order_index': abs(hash(order.id)) % (10**8),
+                    'market_id': market_id
+                })
+                
+                # Track order (will get tx_hash after batch submission)
                 self.orders[order.id] = order
-                self.client_to_exchange_id[order.id] = tx_hash_str
-                self.exchange_to_client_id[tx_hash_str] = order.id
-                
-                # Also store mapping by order index for WebSocket matching
-                order_index_key = f"order_index_{client_order_index}"
-                self.exchange_to_client_id[order_index_key] = order.id
-                
-                # Acknowledge order
-                self.ack_order(order.id, exchange_order_id=tx_hash_str)
-                successful_orders.append(order.id)
-                logger.info(f"Batch order placed: {order.id} -> {tx_hash_str}")
                 
             except Exception as e:
-                logger.error(f"Error placing batch order {order.id}: {e}")
+                logger.error(f"Error preparing batch order {order.id}: {e}")
                 self.reject_order(
                     order.id,
                     reject_reason=OrderRejectReason.InvalidOrder,
                     reject_message=str(e)
                 )
-                failed_orders.append(order.id)
         
-        logger.info(f"Batch order complete: {len(successful_orders)} successful, {len(failed_orders)} failed")
+        # Submit batch if we have any valid orders
+        if tx_types and tx_infos:
+            try:
+                # Convert to JSON as expected by API
+                tx_types_json = json.dumps([int(t) for t in tx_types])
+                tx_infos_json = json.dumps(tx_infos)
+                logger.info(f"Batch submission - tx_types: {tx_types_json}")
+                logger.debug(f"Batch submission - tx_infos: {tx_infos_json[:200]}...")
+                
+                logger.info(f"Submitting batch of {len(tx_types)} orders to Lighter")
+                
+                # Use TransactionApi to send the batch
+                # Create API client for batch submission
+                config = Configuration(
+                    host=os.getenv("LIGHTER_API_URL", "https://mainnet.zklighter.elliot.ai"),
+                    api_key={"ApiKeyAuth": os.getenv("LIGHTER_API_KEY")}
+                )
+                async with ApiClient(config) as api_client:
+                    tx_api = TransactionApi(api_client)
+                    tx_hashes = await tx_api.send_tx_batch(
+                        tx_types=tx_types_json,
+                        tx_infos=tx_infos_json
+                    )
+                    
+                    logger.info(f"Batch submitted successfully: {tx_hashes}")
+                    
+                    # Process results
+                    if hasattr(tx_hashes, 'tx_hashes') and tx_hashes.tx_hashes:
+                        for i, (tx_hash, order_mapping) in enumerate(zip(tx_hashes.tx_hashes, order_mappings)):
+                            order = order_mapping['order']
+                            client_order_index = order_mapping['client_order_index']
+                            
+                            # Store mappings
+                            self.client_to_exchange_id[order.id] = tx_hash
+                            self.exchange_to_client_id[tx_hash] = order.id
+                            
+                            # Also store mapping by order index
+                            order_index_key = f"order_index_{client_order_index}"
+                            self.exchange_to_client_id[order_index_key] = order.id
+                            
+                            # Acknowledge order
+                            self.ack_order(order.id, exchange_order_id=tx_hash)
+                            logger.info(f"Batch order acknowledged: {order.id} -> {tx_hash}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to submit batch: {e}")
+                # Reject all orders in the batch
+                for order_mapping in order_mappings:
+                    order = order_mapping['order']
+                    self.reject_order(
+                        order.id,
+                        reject_reason=OrderRejectReason.Unknown,
+                        reject_message=f"Batch submission failed: {str(e)}"
+                    )
+        
+        logger.info(f"Batch order processing complete")
     
     async def on_cancel_order(self, cancel: Cancel, original_order: Optional[Order] = None):
         """Handle cancel order request."""

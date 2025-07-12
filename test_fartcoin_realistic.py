@@ -66,10 +66,11 @@ async def main():
             post_only=False,
         )
         
-        print(f"\n✓ Order placed successfully!")
         print(f"Architect Order ID: {place_order_result.id}")
+        await asyncio.sleep(1)
         status = await architect_client.get_order(place_order_result.id)
         print(f"Status: {status}")
+        import pdb; pdb.set_trace()
         
         # Wait for order to process
         await asyncio.sleep(5)

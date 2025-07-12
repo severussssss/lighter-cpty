@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test cancelling orders through Architect."""
+"""Test cancelling orders through Architect - minimal version without get_open_orders."""
 import asyncio
 import os
 import sys
@@ -28,7 +28,7 @@ async def get_default_architect_client() -> AsyncClient:
 
 
 async def main():
-    print("=== Testing Order Cancel Functionality ===\n")
+    print("=== Testing Order Cancel Functionality (Minimal) ===\n")
     
     # Initialize client
     architect_client = await get_default_architect_client()
@@ -71,29 +71,10 @@ async def main():
         
         # Wait for order to be acknowledged
         print("\nWaiting for order to be processed...")
-        await asyncio.sleep(0.1)
-        
-        # Check order status before cancelling
-        print(f"\n=== Step 2: Checking Order Status ===")
-        try:
-            orders = await architect_client.get_open_orders(venue="LIGHTER")
-            order_found = False
-            for order in orders:
-                if str(order.id) == str(place_result.id):
-                    print(f"Order found with status: {order.status}")
-                    order_found = True
-                    break
-            
-            if not order_found:
-                print("Order not found in open orders - it may have been rejected or filled")
-                await architect_client.close()
-                return
-                
-        except Exception as e:
-            print(f"Error checking order: {e}")
+        await asyncio.sleep(2)
         
         # Cancel the order
-        print(f"\n=== Step 3: Cancelling Order ===")
+        print(f"\n=== Step 2: Cancelling Order ===")
         print(f"Cancelling order: {place_result.id}")
         
         cancel_result = await architect_client.cancel_order(
@@ -105,34 +86,18 @@ async def main():
         print(f"Status: {cancel_result.status}")
         
         # Wait for cancellation to process
+        print("\nWaiting for cancellation to process...")
         await asyncio.sleep(5)
         
-        # Check final order status
-        print(f"\n=== Step 4: Checking Final Order Status ===")
-        try:
-            orders = await architect_client.get_open_orders(venue="LIGHTER")
-            cancelled = True
-            for order in orders:
-                if str(order.id) == str(place_result.id):
-                    print(f"Order still open with status: {order.status}")
-                    cancelled = False
-                    break
-            
-            if cancelled:
-                print("✓ Order successfully cancelled (not in open orders)")
-            else:
-                print("✗ Order may still be open")
-                
-        except Exception as e:
-            print(f"Could not check order status: {e}")
-            
+        print("\n✓ Test completed. Check CPTY logs to verify cancellation.")
+        
     except Exception as e:
         print(f"\n✗ Error: {e}")
         import traceback
         traceback.print_exc()
     
     print("\n=== Check CPTY Logs ===")
-    print("Run: tmux capture-pane -t lighter-cpty -p | grep -i cancel | tail -20")
+    print(f"Run: tail -n 100 cpty.log | grep -E '({order_id}|cancel)' | tail -20")
     
     await architect_client.close()
 

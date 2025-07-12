@@ -46,10 +46,10 @@ LIGHTER_URL=https://mainnet.zklighter.elliot.ai
 
 ### 4. Run the Services
 
-Start both the CPTY server and orderbook streamer:
+Start both the CPTY server:
 
 ```bash
-./start_lighter_services.sh
+python -m LighterCpty.lighter_cpty_async
 ```
 
 This starts:
