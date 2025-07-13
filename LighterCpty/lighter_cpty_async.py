@@ -82,6 +82,9 @@ class LighterCpty(AsyncCpty):
         self.symbol_to_market_id: Dict[str, int] = {}
         self.market_id_to_symbol: Dict[int, str] = {}
         
+        # Market precision data (fetched from API)
+        self.market_precision: Dict[int, Dict[str, int]] = {}  # market_id -> {price_decimals, size_decimals, min_base_amount}
+        
         # Order tracking
         self.orders: Dict[str, Order] = {}
         self.client_to_exchange_id: Dict[str, str] = {}
@@ -187,7 +190,7 @@ class LighterCpty(AsyncCpty):
     
     def _init_execution_info(self):
         """Initialize execution info for known markets."""
-        # Default markets
+        # Default markets with their known precisions (will be overridden by API data)
         default_markets = [
             (0, "BTC", "USDC"),
             (1, "ETH", "USDC"),
@@ -199,22 +202,35 @@ class LighterCpty(AsyncCpty):
             (7, "LINK", "USDC"),
             (8, "APT", "USDC"),
             (9, "NEAR", "USDC"),
-            (20, "BERA", "USDC"),
-            (21, "FARTCOIN", "USDC"),
-            (24, "HYPE", "USDC"),
+            (20, "BERA", "USDC", 5, 1),  # Known precision: 5 price decimals, 1 size decimal
+            (21, "FARTCOIN", "USDC", 5, 1),  # Known precision: 5 price decimals, 1 size decimal
+            (24, "HYPE", "USDC", 4, 2),  # Known precision: 4 price decimals, 2 size decimals
         ]
         
-        for market_id, base, quote in default_markets:
+        for market_info in default_markets:
+            if len(market_info) == 5:
+                market_id, base, quote, price_decimals, size_decimals = market_info
+            else:
+                market_id, base, quote = market_info
+                price_decimals, size_decimals = 2, 6  # Defaults
+                
             architect_symbol = f"{base}-{quote} LIGHTER Perpetual/{quote} Crypto"
             self.symbol_to_market_id[architect_symbol] = market_id
             self.market_id_to_symbol[market_id] = architect_symbol
+            
+            # Store default precision (will be updated from API later)
+            self.market_precision[market_id] = {
+                'price_decimals': price_decimals,
+                'size_decimals': size_decimals,
+                'min_base_amount': 0.1
+            }
             
             # Add execution info
             exec_info = ExecutionInfo(
                 execution_venue="LIGHTER",
                 exchange_symbol=f"{base}-{quote}",
-                tick_size={"simple": "0.00001"},
-                step_size="0.1",
+                tick_size={"simple": str(10 ** -price_decimals)},
+                step_size=str(10 ** -size_decimals),
                 min_order_quantity="0.1",
                 min_order_quantity_unit={"unit": "base"},
                 is_delisted=False,
@@ -228,6 +244,73 @@ class LighterCpty(AsyncCpty):
             
             self.execution_info[self.execution_venue][architect_symbol] = exec_info
     
+    async def _fetch_market_info(self) -> bool:
+        """Fetch market information from the API."""
+        try:
+            import aiohttp
+            
+            url = f"{self.config['url']}/api/v1/orderBooks"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch market info: {response.status}")
+                        return False
+                    
+                    data = await response.json()
+                    order_books = data.get('order_books', [])
+                    
+                    # Clear existing data
+                    self.market_precision.clear()
+                    self.symbol_to_market_id.clear()
+                    self.market_id_to_symbol.clear()
+                    
+                    # Process each market
+                    for market in order_books:
+                        market_id = market.get('market_id')
+                        symbol = market.get('symbol')
+                        
+                        if market_id and symbol:
+                            # Create architect symbol format
+                            architect_symbol = f"{symbol}-USDC LIGHTER Perpetual/USDC Crypto"
+                            
+                            # Store mappings
+                            self.symbol_to_market_id[architect_symbol] = market_id
+                            self.market_id_to_symbol[market_id] = architect_symbol
+                            
+                            # Store precision data
+                            self.market_precision[market_id] = {
+                                'price_decimals': market.get('supported_price_decimals', 2),
+                                'size_decimals': market.get('supported_size_decimals', 6),
+                                'min_base_amount': float(market.get('min_base_amount', '0.1'))
+                            }
+                            
+                            # Update execution info
+                            exec_info = ExecutionInfo(
+                                execution_venue="LIGHTER",
+                                exchange_symbol=f"{symbol}-USDC",
+                                tick_size={"simple": str(10 ** -market.get('supported_price_decimals', 2))},
+                                step_size=str(10 ** -market.get('supported_size_decimals', 6)),
+                                min_order_quantity=market.get('min_base_amount', '0.1'),
+                                min_order_quantity_unit={"unit": "base"},
+                                is_delisted=market.get('status') != 'active',
+                                initial_margin=None,
+                                maintenance_margin=None,
+                            )
+                            
+                            # Initialize the venue dict if needed
+                            if self.execution_venue not in self.execution_info:
+                                self.execution_info[self.execution_venue] = {}
+                            
+                            self.execution_info[self.execution_venue][architect_symbol] = exec_info
+                    
+                    logger.info(f"Loaded {len(self.market_precision)} markets from API")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Error fetching market info: {e}")
+            return False
+
     async def _init_clients(self) -> bool:
         """Initialize Lighter SDK clients."""
         try:
@@ -285,6 +368,9 @@ class LighterCpty(AsyncCpty):
             except Exception as e:
                 logger.warning(f"Failed to load market info: {e}")
                 # Continue with default market names
+            
+            # Also fetch market precision information from API
+            await self._fetch_market_info()
             
             # Initialize WebSocket
             await self._init_websocket()
@@ -648,13 +734,23 @@ class LighterCpty(AsyncCpty):
                 )
                 return
             
-            # Convert price and quantity based on market
-            if market_id == 21:  # FARTCOIN
-                price_int = int(float(order.limit_price) * 100000) if order.limit_price else 0  # 5 decimals
-                base_amount = int(float(order.quantity) * 10)  # 1 decimal
+            # Get precision info for this market
+            precision = self.market_precision.get(market_id)
+            if not precision:
+                # Fallback to defaults if market precision not loaded
+                logger.warning(f"No precision info for market {market_id}, using defaults")
+                price_decimals = 2
+                size_decimals = 6
             else:
-                price_int = int(float(order.limit_price) * 100) if order.limit_price else 0
-                base_amount = int(float(order.quantity) * 1e6)
+                price_decimals = precision['price_decimals']
+                size_decimals = precision['size_decimals']
+            
+            # Convert price and quantity based on market precision
+            price_int = int(float(order.limit_price) * (10 ** price_decimals)) if order.limit_price else 0
+            base_amount = int(float(order.quantity) * (10 ** size_decimals))
+            
+            logger.info(f"Market {market_id} precision: price_decimals={price_decimals}, size_decimals={size_decimals}")
+            logger.info(f"Order conversion: price={order.limit_price} -> {price_int}, quantity={order.quantity} -> {base_amount}")
             
             # Place order on Lighter
             tx, tx_hash, err = await self.signer_client.create_order(
@@ -767,13 +863,20 @@ class LighterCpty(AsyncCpty):
                     )
                     continue
                 
-                # Convert price and quantity based on market
-                if market_id == 21:  # FARTCOIN
-                    price_int = int(float(order.limit_price) * 100000) if order.limit_price else 0  # 5 decimals
-                    base_amount = int(float(order.quantity) * 10)  # 1 decimal
+                # Get precision info for this market
+                precision = self.market_precision.get(market_id)
+                if not precision:
+                    # Fallback to defaults if market precision not loaded
+                    logger.warning(f"No precision info for market {market_id}, using defaults")
+                    price_decimals = 2
+                    size_decimals = 6
                 else:
-                    price_int = int(float(order.limit_price) * 100) if order.limit_price else 0
-                    base_amount = int(float(order.quantity) * 1e6)
+                    price_decimals = precision['price_decimals']
+                    size_decimals = precision['size_decimals']
+                
+                # Convert price and quantity based on market precision
+                price_int = int(float(order.limit_price) * (10 ** price_decimals)) if order.limit_price else 0
+                base_amount = int(float(order.quantity) * (10 ** size_decimals))
                 
                 # Sign the order (creates tx_info)
                 tx_info, error = self.signer_client.sign_create_order(

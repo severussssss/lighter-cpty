@@ -7,8 +7,8 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "architect-py"))
+# sys.path.insert(0, str(Path(__file__).parent))
+# sys.path.insert(0, str(Path(__file__).parent / "architect-py"))
 
 import dotenv
 from architect_py.async_client import AsyncClient
