@@ -332,6 +332,7 @@ class LighterCpty(AsyncCpty):
             # Check client validity
             err = self.signer_client.check_client()
             if err is not None:
+                import pdb;pdb.set_trace()
                 logger.error(f"Signer client check failed: {err}")
                 return False
             
