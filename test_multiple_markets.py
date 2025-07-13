@@ -9,7 +9,7 @@ from pathlib import Path
 
 import dotenv
 from architect_py.async_client import AsyncClient
-from architect_py import OrderDir, OrderType, TimeInForce
+from architect_py import OrderDir, TimeInForce
 from architect_py.batch_place_order import BatchPlaceOrder
 
 dotenv.load_dotenv()
@@ -49,7 +49,6 @@ async def main():
     
     # Create batch
     batch = BatchPlaceOrder()
-    order_ids = []
     
     print("\n📦 Preparing batch orders:")
     for i, (symbol, base_symbol, price, quantity, side) in enumerate(test_configs, 1):
@@ -64,10 +63,10 @@ async def main():
         print(f"  Price: {price}")
         
         await batch.place_order(
-            id=order_id,
+            order_id=order_id,
             symbol=architect_symbol,
             dir=side,
-            order_type=OrderType.LIMIT,
+            order_type="LIMIT",
             limit_price=Decimal(price),
             quantity=Decimal(quantity),
             time_in_force=TimeInForce.GTC,
@@ -75,49 +74,8 @@ async def main():
             account=account_address,
             post_only=False,
         )
-        order_ids.append(order_id)
     
     print(f"\n📨 Sending batch of {len(batch.place_orders)} orders...")
-    
-    # Track orderflow events
-    order_events = {order_id: [] for order_id in order_ids}
-    successful_orders = set()
-    rejected_orders = set()
-    
-    async def track_events():
-        """Track orderflow events for our orders."""
-        async for event in architect_client.stream_orderflow(venue="LIGHTER"):
-            # Check if this event is for one of our orders
-            order_id = None
-            
-            if hasattr(event, 'order_id'):
-                order_id = event.order_id
-            elif hasattr(event, 'order') and hasattr(event.order, 'id'):
-                order_id = event.order.id
-                
-            if order_id in order_events:
-                event_type = type(event).__name__
-                order_events[order_id].append(event_type)
-                print(f"  📍 Order {order_id[:8]}... - {event_type}")
-                
-                if event_type == "OrderAck":
-                    successful_orders.add(order_id)
-                elif event_type == "OrderReject":
-                    rejected_orders.add(order_id)
-                    if hasattr(event, 'reject_reason'):
-                        print(f"     ❌ Reject reason: {event.reject_reason}")
-                    if hasattr(event, 'message'):
-                        print(f"     ❌ Message: {event.message}")
-                
-                # Stop after we've heard about all orders
-                if len(successful_orders) + len(rejected_orders) >= len(order_ids):
-                    return
-    
-    # Start tracking events
-    event_task = asyncio.create_task(track_events())
-    
-    # Wait a bit to ensure subscription is active
-    await asyncio.sleep(0.5)
     
     # Place the batch order
     try:
@@ -138,33 +96,18 @@ async def main():
         import traceback
         traceback.print_exc()
     
-    # Wait for events to complete
-    print("\n⏳ Waiting for order events...")
-    try:
-        await asyncio.wait_for(event_task, timeout=10.0)
-    except asyncio.TimeoutError:
-        print("Timeout waiting for all events")
-        event_task.cancel()
+    await asyncio.sleep(1)  # Wait for orders to process
     
-    # Summary
-    print(f"\n=== Summary ===")
-    print(f"Total orders sent: {len(order_ids)}")
-    print(f"Successful orders: {len(successful_orders)}")
-    print(f"Rejected orders: {len(rejected_orders)}")
-    
-    for i, (order_id, (symbol, _, _, _, _)) in enumerate(zip(order_ids, test_configs), 1):
-        events = order_events[order_id]
-        status = "✅ Success" if order_id in successful_orders else "❌ Rejected" if order_id in rejected_orders else "⏳ Unknown"
-        print(f"\nOrder {i} ({symbol}): {status}")
-        print(f"  Events: {', '.join(events) if events else 'None'}")
-    
-    # Get open orders
+    # Get open orders from Architect
     print("\n📋 Checking open orders...")
     try:
-        open_orders = await architect_client.open_orders(venue="LIGHTER")
-        print(f"Found {len(open_orders)} open orders")
+        open_orders = await architect_client.get_open_orders(venue="LIGHTER")
+        import pdb;pdb.set_trace()
+        # Filter for only Open status, exclude Pending
+        truly_open_orders = [o for o in open_orders if o.status.name == "Open"]
+        print(f"Found {len(truly_open_orders)} open LIGHTER orders (status=Open)")
         
-        for order in open_orders[:5]:  # Show first 5
+        for order in truly_open_orders:
             print(f"  - {order.symbol}: {order.dir.name} {order.quantity} @ ${order.limit_price}")
     except Exception as e:
         print(f"Error getting open orders: {e}")
