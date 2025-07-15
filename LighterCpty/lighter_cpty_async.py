@@ -135,6 +135,10 @@ class LighterCpty(AsyncCpty):
                     logger.debug(f"  → Order ID: {event.order_id}")
                     logger.debug(f"  → Fill quantity: {event.quantity}")
                     logger.debug(f"  → Fill price: {event.price}")
+                elif type(event).__name__ == 'TaggedOrderCanceled':
+                    logger.info(f"  → CANCEL EVENT for Order ID: {event}")
+                elif type(event).__name__ == 'TaggedOrderOut':
+                    logger.info(f"  → OUT EVENT for Order ID: {event}")
         
         # Call parent method to actually put the event
         super()._put_orderflow_event(event)
@@ -985,11 +989,31 @@ class LighterCpty(AsyncCpty):
                 )
                 return
             
-            # Cancel accepted - no explicit ack_cancel method in AsyncCpty
+            # Cancel accepted - immediately mark order as cancelled
             logger.info(f"Order cancel sent: {original_order.id} -> {cancel_hash}")
             
-            # After some delay, mark as cancelled (in real implementation, wait for exchange confirmation)
-            asyncio.create_task(self._finalize_cancel(original_order.id, cancel.xid))
+            # Update the order status first
+            if original_order.id in self.orders:
+                self.orders[original_order.id].status = OrderStatus.Canceled
+                logger.info(f"Updated order status to Canceled for {original_order.id}")
+            
+            # Immediately out the order as cancelled since Lighter doesn't provide async cancel confirmations
+            logger.info(f"Calling out_order for {original_order.id} with canceled=True")
+            self.out_order(original_order.id, canceled=True)
+            logger.info(f"out_order called successfully")
+            
+            # Clean up exchange ID tracking but keep the order in self.orders
+            if original_order.id in self.client_to_exchange_id:
+                exchange_id = self.client_to_exchange_id[original_order.id]
+                del self.client_to_exchange_id[original_order.id]
+                if exchange_id in self.exchange_to_client_id:
+                    del self.exchange_to_client_id[exchange_id]
+            
+            # Clean up filled quantities
+            if original_order.id in self._order_filled_quantities:
+                del self._order_filled_quantities[original_order.id]
+            
+            logger.info(f"Order cancelled immediately: {original_order.id}")
             
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")
@@ -1055,11 +1079,25 @@ class LighterCpty(AsyncCpty):
             
             logger.info(f"Marking {len(orders_to_cancel)} orders as cancelled")
             
-            # Mark all matching orders as cancelled
+            # Mark all matching orders as cancelled immediately
             for order_id in orders_to_cancel:
-                # Create a unique cancel ID for tracking
-                cancel_id = f"cancel_all_{int(time.time() * 1000)}_{order_id}"
-                asyncio.create_task(self._finalize_cancel(order_id, cancel_id))
+                # Update order status
+                if order_id in self.orders:
+                    self.orders[order_id].status = OrderStatus.Canceled
+                
+                # Immediately out the order as cancelled
+                self.out_order(order_id, canceled=True)
+                
+                # Clean up tracking but keep order in self.orders
+                if order_id in self.client_to_exchange_id:
+                    exchange_id = self.client_to_exchange_id[order_id]
+                    del self.client_to_exchange_id[order_id]
+                    if exchange_id in self.exchange_to_client_id:
+                        del self.exchange_to_client_id[exchange_id]
+                
+                # Clean up filled quantities
+                if order_id in self._order_filled_quantities:
+                    del self._order_filled_quantities[order_id]
                 
             logger.info("Cancel all orders completed")
             
@@ -1072,6 +1110,7 @@ class LighterCpty(AsyncCpty):
         """Get all open orders."""
         open_orders = []
         for order_id, order in self.orders.items():
+            # Exclude canceled orders
             if order.status in [OrderStatus.Pending, OrderStatus.Open]:
                 open_orders.append(order)
         return open_orders
@@ -1271,32 +1310,6 @@ class LighterCpty(AsyncCpty):
         """Calculate total filled quantity for an order."""
         return self._order_filled_quantities.get(order_id, Decimal("0"))
     
-    async def _finalize_cancel(self, order_id: str, cancel_id: str):
-        """Finalize order cancellation after exchange confirmation."""
-        # Wait a bit for exchange to process
-        await asyncio.sleep(2)
-        
-        try:
-            # Out the order as cancelled
-            self.out_order(order_id, canceled=True)
-            
-            # Clean up tracking
-            if order_id in self.client_to_exchange_id:
-                exchange_id = self.client_to_exchange_id[order_id]
-                del self.client_to_exchange_id[order_id]
-                if exchange_id in self.exchange_to_client_id:
-                    del self.exchange_to_client_id[exchange_id]
-            
-            # Remove from orders dict and clean up tracking
-            if order_id in self.orders:
-                del self.orders[order_id]
-            if order_id in self._order_filled_quantities:
-                del self._order_filled_quantities[order_id]
-            
-            logger.info(f"Order cancelled: {order_id}")
-            
-        except Exception as e:
-            logger.error(f"Error finalizing cancel: {e}")
     
     async def _fetch_and_process_recent_trades(self):
         """Fetch recent trades from API when trade count changes."""
