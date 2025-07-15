@@ -3,7 +3,6 @@ import asyncio
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 import uuid
@@ -11,7 +10,6 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Set
-from dotenv import load_dotenv
 
 # Suppress debug logs from architect_py by default
 logging.getLogger('architect_py').setLevel(logging.INFO)
@@ -72,9 +70,15 @@ class LighterCpty(AsyncCpty):
         self.api_client: Optional[ApiClient] = None
         self.balance_fetcher: Optional[LighterBalanceFetcher] = None
         
+        # Store Configuration instance to reuse
+        self.api_configuration: Optional[Configuration] = None
+        
         # Session management
         self.logged_in = False
         self.user_id: Optional[str] = None
+        
+        # Nonce tracking
+        self.current_nonce: Optional[int] = None
         self.account_id: Optional[str] = None
         self.account_index: Optional[int] = None
         
@@ -175,17 +179,22 @@ class LighterCpty(AsyncCpty):
             yield next_item
     
     def _load_config_from_env(self) -> Dict:
-        """Load configuration from environment variables."""
-        env_path = Path(__file__).parent.parent.parent.parent.parent.parent / "lighter-python" / "examples" / ".env"
-        if env_path.exists():
-            load_dotenv(env_path)
-            logger.info(f"Loaded .env from {env_path}")
+        """Load configuration from secrets.json file."""
+        secrets_path = Path(__file__).parent.parent / "secrets.json"
+        
+        if not secrets_path.exists():
+            logger.error(f"secrets.json not found at {secrets_path}")
+            raise FileNotFoundError(f"secrets.json not found at {secrets_path}")
+        
+        with open(secrets_path, 'r') as f:
+            secrets = json.load(f)
+            logger.info(f"Loaded secrets from {secrets_path}")
         
         return {
-            "url": os.getenv("LIGHTER_URL", "https://mainnet.zklighter.elliot.ai"),
-            "private_key": os.getenv("LIGHTER_API_KEY_PRIVATE_KEY", ""),
-            "account_index": int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0")),
-            "api_key_index": int(os.getenv("LIGHTER_API_KEY_INDEX", "1"))
+            "url": secrets.get("LIGHTER_URL", "https://mainnet.zklighter.elliot.ai"),
+            "private_key": secrets.get("LIGHTER_API_KEY_PRIVATE_KEY", ""),
+            "account_index": secrets.get("LIGHTER_ACCOUNT_INDEX", 0),
+            "api_key_index": secrets.get("LIGHTER_API_KEY_INDEX", 1)
         }
     
     def _init_execution_info(self):
@@ -314,9 +323,15 @@ class LighterCpty(AsyncCpty):
     async def _init_clients(self) -> bool:
         """Initialize Lighter SDK clients."""
         try:
+            # Initialize API configuration (reuse if already exists)
+            if not self.api_configuration:
+                self.api_configuration = Configuration(
+                    host=self.config["url"],
+                    api_key={"ApiKeyAuth": None}  # API key not needed for the operations we're doing
+                )
+            
             # Initialize API client
-            configuration = Configuration(host=self.config["url"])
-            self.api_client = ApiClient(configuration=configuration)
+            self.api_client = ApiClient(configuration=self.api_configuration)
             
             # Initialize balance fetcher
             self.balance_fetcher = LighterBalanceFetcher(self.api_client)
@@ -699,6 +714,8 @@ class LighterCpty(AsyncCpty):
                 raise Exception("Failed to initialize Lighter clients")
         
         self.logged_in = True
+        # Reset nonce on login so we fetch fresh from API
+        self.current_nonce = None
         logger.info(f"Login successful for user {self.user_id}")
         
         # Start periodic updates
@@ -823,19 +840,31 @@ class LighterCpty(AsyncCpty):
         
         # Get the starting nonce for the batch
         try:
-            # Create API client to get nonce
-            config = Configuration(
-                host=os.getenv("LIGHTER_API_URL", "https://mainnet.zklighter.elliot.ai"),
-                api_key={"ApiKeyAuth": os.getenv("LIGHTER_API_KEY")}
+            # Use existing API client
+            if not self.api_client:
+                logger.error("API client not initialized")
+                # Reject all orders
+                for order in batch.orders:
+                    self.reject_order(
+                        order.id,
+                        reject_reason=OrderRejectReason.Unknown,
+                        reject_message="API client not initialized"
+                    )
+                return
+            
+            # Always fetch fresh nonce from API for batch orders
+            # Use the account_index from config that matches the signer client
+            tx_api = TransactionApi(self.api_client)
+            next_nonce_response = await tx_api.next_nonce(
+                account_index=self.config["account_index"],
+                api_key_index=self.config["api_key_index"]
             )
-            async with ApiClient(config) as api_client:
-                tx_api = TransactionApi(api_client)
-                next_nonce_response = await tx_api.next_nonce(
-                    account_index=self.account_index,
-                    api_key_index=self.config["api_key_index"]
-                )
-                current_nonce = next_nonce_response.nonce
-                logger.info(f"Starting batch with nonce: {current_nonce}")
+            current_nonce = next_nonce_response.nonce
+            logger.info(f"Fetched fresh nonce from API: {current_nonce}")
+            
+            # Debug: Let's check what's happening
+            logger.info(f"API response full: {next_nonce_response}")
+            logger.info(f"Account being used: {self.config['account_index']}")
         except Exception as e:
             logger.error(f"Failed to get nonce: {e}")
             # Reject all orders
@@ -880,6 +909,7 @@ class LighterCpty(AsyncCpty):
                 base_amount = int(float(order.quantity) * (10 ** size_decimals))
                 
                 # Sign the order (creates tx_info)
+                logger.info(f"Signing order {order.id} with nonce: {current_nonce}")
                 tx_info, error = self.signer_client.sign_create_order(
                     market_index=market_id,
                     client_order_index=abs(hash(order.id)) % (10**8),
@@ -938,37 +968,31 @@ class LighterCpty(AsyncCpty):
                 logger.info(f"Submitting batch of {len(tx_types)} orders to Lighter")
                 
                 # Use TransactionApi to send the batch
-                # Create API client for batch submission
-                config = Configuration(
-                    host=os.getenv("LIGHTER_API_URL", "https://mainnet.zklighter.elliot.ai"),
-                    api_key={"ApiKeyAuth": os.getenv("LIGHTER_API_KEY")}
+                tx_api = TransactionApi(self.api_client)
+                tx_hashes = await tx_api.send_tx_batch(
+                    tx_types=tx_types_json,
+                    tx_infos=tx_infos_json
                 )
-                async with ApiClient(config) as api_client:
-                    tx_api = TransactionApi(api_client)
-                    tx_hashes = await tx_api.send_tx_batch(
-                        tx_types=tx_types_json,
-                        tx_infos=tx_infos_json
-                    )
-                    
-                    logger.info(f"Batch submitted successfully: {tx_hashes}")
-                    
-                    # Process results
-                    if hasattr(tx_hashes, 'tx_hashes') and tx_hashes.tx_hashes:
-                        for i, (tx_hash, order_mapping) in enumerate(zip(tx_hashes.tx_hashes, order_mappings)):
-                            order = order_mapping['order']
-                            client_order_index = order_mapping['client_order_index']
-                            
-                            # Store mappings
-                            self.client_to_exchange_id[order.id] = tx_hash
-                            self.exchange_to_client_id[tx_hash] = order.id
-                            
-                            # Also store mapping by order index
-                            order_index_key = f"order_index_{client_order_index}"
-                            self.exchange_to_client_id[order_index_key] = order.id
-                            
-                            # Acknowledge order
-                            self.ack_order(order.id, exchange_order_id=tx_hash)
-                            logger.info(f"Batch order acknowledged: {order.id} -> {tx_hash}")
+                
+                logger.info(f"Batch submitted successfully: {tx_hashes}")
+                
+                # Process results
+                if hasattr(tx_hashes, 'tx_hashes') and tx_hashes.tx_hashes:
+                    for i, (tx_hash, order_mapping) in enumerate(zip(tx_hashes.tx_hashes, order_mappings)):
+                        order = order_mapping['order']
+                        client_order_index = order_mapping['client_order_index']
+                        
+                        # Store mappings
+                        self.client_to_exchange_id[order.id] = tx_hash
+                        self.exchange_to_client_id[tx_hash] = order.id
+                        
+                        # Also store mapping by order index
+                        order_index_key = f"order_index_{client_order_index}"
+                        self.exchange_to_client_id[order_index_key] = order.id
+                        
+                        # Acknowledge order
+                        self.ack_order(order.id, exchange_order_id=tx_hash)
+                        logger.info(f"Batch order acknowledged: {order.id} -> {tx_hash}")
                     
             except Exception as e:
                 logger.error(f"Failed to submit batch: {e}")
