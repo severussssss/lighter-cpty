@@ -39,12 +39,26 @@ async def main():
     # HYPE: price_decimals=4, size_decimals=2, min_base_amount=0.50
     # BTC: price_decimals=1, size_decimals=5, min_base_amount=0.00020
     # 1000BONK: price_decimals=6, size_decimals=0, min_base_amount=500
+    # AI16Z: price_decimals=5, size_decimals=1, min_base_amount=20.0
+    # DOGE: price_decimals=6, size_decimals=0, min_base_amount=10
+    # APT: price_decimals=4, size_decimals=2, min_base_amount=2.00
+    # SEI: price_decimals=5, size_decimals=1, min_base_amount=50.0
+    # CRV: price_decimals=5, size_decimals=1, min_base_amount=20.0
+    # ENA: price_decimals=5, size_decimals=1, min_base_amount=20.0
+    # S: price_decimals=5, size_decimals=1, min_base_amount=20.0
     
     test_configs = [
         # (symbol, base_symbol, price, quantity, side)
         ("HYPE", "HYPE", "54.1234", "0.5", OrderDir.SELL),  # 4 price decimals, 2 size decimals
         ("BTC", "BTC", "125432.1", "0.0002", OrderDir.SELL),  # 1 price decimal, 5 size decimals
         ("1000BONK", "1000BONK", "0.035678", "500", OrderDir.SELL),  # 6 price decimals, 0 size decimals
+        ("AI16Z", "AI16Z", "1.23456", "20.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        ("DOGE", "DOGE", "0.245678", "10", OrderDir.SELL),  # 6 price decimals, 0 size decimals
+        ("APT", "APT", "14.5678", "2.00", OrderDir.SELL),  # 4 price decimals, 2 size decimals
+        ("SEI", "SEI", "0.45432", "100.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        ("CRV", "CRV", "0.84321", "40.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        ("ENA", "ENA", "0.37654", "50.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        ("S", "S", "0.52345", "20.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
     ]
     
     # Create batch

@@ -43,13 +43,11 @@ try:
     from .lighter_ws import LighterWebSocketClient
     from .balance_fetcher import LighterBalanceFetcher
     from .orderbook_manager import OrderBook
-    from .market_loader import load_market_info
 except ImportError:
     # For when running directly
     from lighter_ws import LighterWebSocketClient
     from balance_fetcher import LighterBalanceFetcher
     from orderbook_manager import OrderBook
-    from market_loader import load_market_info
 
 logger = logging.getLogger(__name__)
 
@@ -199,59 +197,10 @@ class LighterCpty(AsyncCpty):
     
     def _init_execution_info(self):
         """Initialize execution info for known markets."""
-        # Default markets with their known precisions (will be overridden by API data)
-        default_markets = [
-            (0, "BTC", "USDC"),
-            (1, "ETH", "USDC"),
-            (2, "SOL", "USDC"),
-            (3, "ARB", "USDC"),
-            (4, "OP", "USDC"),
-            (5, "MATIC", "USDC"),
-            (6, "AVAX", "USDC"),
-            (7, "LINK", "USDC"),
-            (8, "APT", "USDC"),
-            (9, "NEAR", "USDC"),
-            (20, "BERA", "USDC", 5, 1),  # Known precision: 5 price decimals, 1 size decimal
-            (21, "FARTCOIN", "USDC", 5, 1),  # Known precision: 5 price decimals, 1 size decimal
-            (24, "HYPE", "USDC", 4, 2),  # Known precision: 4 price decimals, 2 size decimals
-        ]
-        
-        for market_info in default_markets:
-            if len(market_info) == 5:
-                market_id, base, quote, price_decimals, size_decimals = market_info
-            else:
-                market_id, base, quote = market_info
-                price_decimals, size_decimals = 2, 6  # Defaults
-                
-            architect_symbol = f"{base}-{quote} LIGHTER Perpetual/{quote} Crypto"
-            self.symbol_to_market_id[architect_symbol] = market_id
-            self.market_id_to_symbol[market_id] = architect_symbol
-            
-            # Store default precision (will be updated from API later)
-            self.market_precision[market_id] = {
-                'price_decimals': price_decimals,
-                'size_decimals': size_decimals,
-                'min_base_amount': 0.1
-            }
-            
-            # Add execution info
-            exec_info = ExecutionInfo(
-                execution_venue="LIGHTER",
-                exchange_symbol=f"{base}-{quote}",
-                tick_size={"simple": str(10 ** -price_decimals)},
-                step_size=str(10 ** -size_decimals),
-                min_order_quantity="0.1",
-                min_order_quantity_unit={"unit": "base"},
-                is_delisted=False,
-                initial_margin=None,
-                maintenance_margin=None,
-            )
-            
-            # Initialize the venue dict if needed
-            if self.execution_venue not in self.execution_info:
-                self.execution_info[self.execution_venue] = {}
-            
-            self.execution_info[self.execution_venue][architect_symbol] = exec_info
+        # Markets will be loaded dynamically from API in _fetch_market_info()
+        # Initialize empty structures
+        if self.execution_venue not in self.execution_info:
+            self.execution_info[self.execution_venue] = {}
     
     async def _fetch_market_info(self) -> bool:
         """Fetch market information from the API."""
@@ -347,45 +296,12 @@ class LighterCpty(AsyncCpty):
             # Check client validity
             err = self.signer_client.check_client()
             if err is not None:
-                import pdb;pdb.set_trace()
                 logger.error(f"Signer client check failed: {err}")
                 return False
             
             logger.info("Lighter SDK clients initialized successfully")
             
-            # Load market info for proper symbol names
-            try:
-                market_info = load_market_info()
-                for market_id, info in market_info.items():
-                    base = info.get('base_asset', 'UNKNOWN')
-                    quote = info.get('quote_asset', 'USDC')
-                    architect_symbol = f"{base}-{quote} LIGHTER Perpetual/{quote} Crypto"
-                    self.symbol_to_market_id[architect_symbol] = market_id
-                    self.market_id_to_symbol[market_id] = architect_symbol
-                    
-                    # Update execution info if not already set
-                    if architect_symbol not in self.execution_info.get(self.execution_venue, {}):
-                        exec_info = ExecutionInfo(
-                            execution_venue="LIGHTER",
-                            exchange_symbol=f"{base}-{quote}",
-                            tick_size={"simple": "0.00001"},
-                            step_size="0.1",
-                            min_order_quantity="0.1",
-                            min_order_quantity_unit={"unit": "base"},
-                            is_delisted=False,
-                            initial_margin=None,
-                            maintenance_margin=None,
-                        )
-                        if self.execution_venue not in self.execution_info:
-                            self.execution_info[self.execution_venue] = {}
-                        self.execution_info[self.execution_venue][architect_symbol] = exec_info
-                            
-                logger.info(f"Loaded market info for {len(market_info)} markets")
-            except Exception as e:
-                logger.warning(f"Failed to load market info: {e}")
-                # Continue with default market names
-            
-            # Also fetch market precision information from API
+            # Fetch market precision information from API
             await self._fetch_market_info()
             
             # Initialize WebSocket
