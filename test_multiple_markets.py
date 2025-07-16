@@ -2,14 +2,12 @@
 """Test placing orders on HYPE, BTC, and 1000BONK markets using batch orders."""
 import asyncio
 import os
-import sys
 import uuid
 from decimal import Decimal
-from pathlib import Path
 
 import dotenv
 from architect_py.async_client import AsyncClient
-from architect_py import OrderDir, OrderType, TimeInForce
+from architect_py import OrderDir, OrderType, TimeInForce, OrderStatus
 from architect_py.batch_place_order import BatchPlaceOrder
 
 dotenv.load_dotenv()
@@ -52,12 +50,12 @@ async def main():
         ("HYPE", "HYPE", "54.1234", "0.5", OrderDir.SELL),  # 4 price decimals, 2 size decimals
         ("BTC", "BTC", "125432.1", "0.0002", OrderDir.SELL),  # 1 price decimal, 5 size decimals
         ("1000BONK", "1000BONK", "0.035678", "500", OrderDir.SELL),  # 6 price decimals, 0 size decimals
-        ("AI16Z", "AI16Z", "1.23456", "20.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
-        ("DOGE", "DOGE", "0.245678", "10", OrderDir.SELL),  # 6 price decimals, 0 size decimals
-        ("APT", "APT", "14.5678", "2.00", OrderDir.SELL),  # 4 price decimals, 2 size decimals
-        ("SEI", "SEI", "0.45432", "100.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
-        ("CRV", "CRV", "0.84321", "40.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
-        ("ENA", "ENA", "0.37654", "50.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        #("AI16Z", "AI16Z", "1.23456", "20.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        #("DOGE", "DOGE", "0.245678", "10", OrderDir.SELL),  # 6 price decimals, 0 size decimals
+        #("APT", "APT", "14.5678", "2.00", OrderDir.SELL),  # 4 price decimals, 2 size decimals
+        #("SEI", "SEI", "0.45432", "100.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        #("CRV", "CRV", "0.84321", "40.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
+        #("ENA", "ENA", "0.37654", "50.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
         ("S", "S", "0.52345", "20.0", OrderDir.SELL),  # 5 price decimals, 1 size decimal
     ]
     
@@ -94,6 +92,7 @@ async def main():
     print(f"\n📨 Sending batch of {len(batch.place_orders)} orders...")
     
     # Place the batch order
+    placed_order_ids = []
     try:
         response = await architect_client.place_batch_order(batch)
         print(f"\n✓ Batch order response received")
@@ -106,31 +105,75 @@ async def main():
                 
         if hasattr(response, 'pending_orders') and response.pending_orders:
             print(f"\n✅ {len(response.pending_orders)} orders pending")
+            # Store the actual order IDs
+            for pending in response.pending_orders:
+                placed_order_ids.append(pending.id)
+                print(f"   - {pending.id}")
             
     except Exception as e:
         print(f"\n✗ Error placing batch order: {e}")
         import traceback
         traceback.print_exc()
     
-    # Summary based on response
-    print(f"\n=== Summary ===")
-    print(f"Total orders sent: {len(order_ids)}")
+    # Wait for orders to be acknowledged
+    print("\n⏳ Waiting 0.5s for order acknowledgment...")
+    await asyncio.sleep(0.5)
     
-    # Get open orders
-    print("\n📋 Checking open orders...")
+    # Check order status before cancel
+    print("\n=== Order Status Before Cancel ===")
+    our_orders = []
     try:
-        open_orders = await architect_client.get_open_orders()
-        lighter_orders = [o for o in open_orders if hasattr(o, 've') and o.ve == "LIGHTER"]
-        print(f"Found {len(lighter_orders)} LIGHTER orders")
+        open_orders = await architect_client.get_open_orders(venue="LIGHTER")
+        for order in open_orders:
+            if order.id in placed_order_ids:
+                our_orders.append(order)
+                print(f"  {order.symbol}: {order.status} - {order.dir.name} {order.quantity} @ ${order.limit_price}")
         
-        for order in lighter_orders[:5]:  # Show first 5
-            print(f"  - {order.symbol}: {order.dir.name} {order.quantity} @ ${order.limit_price}")
+        print(f"\nFound {len(our_orders)}/{len(placed_order_ids)} of our orders")
     except Exception as e:
-        print(f"Error getting open orders: {e}")
+        print(f"Error checking orders: {e}")
     
-    print("\n=== All Tests Completed ===")
+    # Cancel all orders
+    print("\n=== Executing Cancel All ===")
+    print("Calling cancel_all_orders() for LIGHTER venue with synthetic=False...")
+    try:
+        await architect_client.cancel_all_orders(execution_venue="LIGHTER", synthetic=False)
+        print("✓ Cancel all request sent")
+    except Exception as e:
+        print(f"✗ Error sending cancel all: {e}")
+    
+    # Wait and check status after cancel
+    print("\n⏳ Waiting 0.5s for cancellation to process...")
+    await asyncio.sleep(0.5)
+    
+    # Check final order status
+    print("\n=== Order Status After Cancel ===")
+    still_open = []
+    try:
+        open_orders = await architect_client.get_open_orders(venue="LIGHTER")
+        for order in open_orders:
+            if order.id in placed_order_ids:
+                still_open.append(order)
+                print(f"  STILL OPEN: {order.symbol}: {order.status}")
+        
+        if len(still_open) == 0:
+            print(f"✅ All {len(placed_order_ids)} orders successfully cancelled!")
+        else:
+            print(f"❌ {len(still_open)}/{len(placed_order_ids)} orders still open")
+            
+    except Exception as e:
+        print(f"Error checking final status: {e}")
+    
+    # Summary
+    print(f"\n=== Summary ===")
+    print(f"• Orders placed: {len(placed_order_ids)}")
+    print(f"• Orders found before cancel: {len(our_orders)}")
+    print(f"• Orders remaining after cancel: {len(still_open)}")
+    print(f"• Cancel success: {'YES' if len(still_open) == 0 else 'NO'}")
+    
+    print("\n=== Test Completed ===")
     print("Check CPTY logs for details:")
-    print("tmux capture-pane -t l_cpty -p | tail -100")
+    print("tmux capture-pane -t l_c -p | tail -100")
     
     await architect_client.close()
 

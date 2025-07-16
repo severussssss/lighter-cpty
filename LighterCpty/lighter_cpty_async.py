@@ -114,6 +114,7 @@ class LighterCpty(AsyncCpty):
         
         if len(self.orderflow_subscriptions) == 0:
             logger.warning("No orderflow subscriptions active! Architect Core may not be connected.")
+            logger.warning("Make sure Architect Core is running and connected to this CPTY.")
         else:
             # Log details about each subscription and queue
             for sub_id, sub in self.orderflow_subscriptions.items():
@@ -152,15 +153,32 @@ class LighterCpty(AsyncCpty):
         logger.info(f"Architect Core subscribing to orderflow: {request}")
         logger.info(f"Subscription request details: {vars(request) if hasattr(request, '__dict__') else request}")
         
+        # Log subscriber information
+        peer_info = context.peer()
+        logger.info(f"Subscriber peer: {peer_info}")
+        
+        # Try to get more context info
+        if hasattr(context, '_rpc_event'):
+            logger.info(f"RPC event: {context._rpc_event}")
+        if hasattr(context, '_metadata'):
+            logger.info(f"Metadata: {context._metadata}")
+        
         # Don't call super() - implement the subscription ourselves to properly intercept events
         from architect_py.async_cpty import OrderflowSubscription
         
         context.set_code(grpc.StatusCode.OK)
         await context.send_initial_metadata([])
         
-        subscription_id = self.next_subscription_id
-        self.next_subscription_id += 1
-        logger.info(f"Created orderflow subscription #{subscription_id}")
+        # Always use subscription ID 1 for orderflow to ensure only one exists
+        subscription_id = 1
+        
+        # Check if a subscription already exists and clean it up
+        if subscription_id in self.orderflow_subscriptions:
+            logger.warning(f"Orderflow subscription already exists. Replacing existing subscription.")
+            # Note: The old subscription's queue will be garbage collected
+            del self.orderflow_subscriptions[subscription_id]
+        
+        logger.info(f"Creating orderflow subscription #{subscription_id}")
         
         def cleanup_subscription(_context):
             if subscription_id in self.orderflow_subscriptions:
@@ -731,8 +749,14 @@ class LighterCpty(AsyncCpty):
             logger.info(f"Order acknowledged: {order.id} -> {tx_hash_str}")
             logger.info(f"Order placed: {order.id} -> {tx_hash_str}, client_order_index: {client_order_index}")
             
-            # Debug: Check orderflow subscriptions
+            # Debug: Check orderflow subscriptions with details
             logger.info(f"Active orderflow subscriptions: {len(self.orderflow_subscriptions)}")
+            for sub_id, subscription in self.orderflow_subscriptions.items():
+                logger.info(f"  Subscription #{sub_id}: {subscription}")
+                if hasattr(subscription, 'request'):
+                    logger.info(f"    Request: {subscription.request}")
+                if hasattr(subscription, 'queue'):
+                    logger.info(f"    Queue size: {subscription.queue.qsize()}")
             
             # Order is now on the exchange - fills will come through WebSocket
             
@@ -1025,13 +1049,13 @@ class LighterCpty(AsyncCpty):
     
     async def on_cancel_all_orders(
         self,
-        account: Optional[str] = None,
-        execution_venue: Optional[str] = None,
+        cancel_id: str,
         trader: Optional[str] = None,
+        account: Optional[str] = None,
     ):
         """Handle cancel all orders request."""
         logger.info("========== CANCEL ALL ORDERS REQUEST ==========")
-        logger.info(f"Account: {account}, Venue: {execution_venue}, Trader: {trader}")
+        logger.info(f"Cancel ID: {cancel_id}, Trader: {trader}, Account: {account}")
         
         if not self.logged_in or not self.signer_client:
             logger.error("Cannot cancel all - not logged in or client not initialized")
@@ -1060,10 +1084,6 @@ class LighterCpty(AsyncCpty):
                 
                 # Filter by account if specified
                 if account and str(order.account) != str(account):
-                    should_cancel = False
-                    
-                # Filter by venue if specified (we only have LIGHTER)
-                if execution_venue and execution_venue != self.execution_venue:
                     should_cancel = False
                     
                 # Filter by trader if specified

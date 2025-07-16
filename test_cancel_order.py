@@ -2,13 +2,8 @@
 """Test cancelling orders through Architect."""
 import asyncio
 import os
-import sys
 import uuid
 from decimal import Decimal
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "architect-py"))
 
 import dotenv
 from architect_py.async_client import AsyncClient
@@ -105,7 +100,7 @@ async def main():
         print(f"Status: {cancel_result.status}")
         
         # Wait for cancellation to process
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
         
         # Check final order status
         print(f"\n=== Step 4: Checking Final Order Status ===")
@@ -123,18 +118,6 @@ async def main():
                 print("✓ Order successfully cancelled (not in open orders)")
             else:
                 print("✗ Order may still be open")
-                
-            # Also try to get the specific order to see its status
-            print("\nTrying to get specific order status...")
-            try:
-                # Check if we can query the order directly
-                all_orders = await architect_client.get_open_orders()
-                for order in all_orders:
-                    if str(order.id) == str(place_result.id):
-                        print(f"Found order in all orders: status={order.status}")
-                        break
-            except Exception as e:
-                print(f"Could not query specific order: {e}")
                 
         except Exception as e:
             print(f"Could not check order status: {e}")
